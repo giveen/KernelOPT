@@ -1,0 +1,40 @@
+# --- Secrets / local environment (NEVER commit) -----------------------------
+.env
+.env.*
+!.env.example
+.env.local
+*.key
+*.pem
+# API keys are read from .env / the environment; never commit them.
+
+# --- Rust -------------------------------------------------------------------
+/target/
+**/*.rs.bk
+
+# --- KernelOPT runtime state ------------------------------------------------
+# journals, candidate dumps, worktrees, CMake build dirs, reports, managed venvs
+.kernelopt/
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# --- torch.compile debug dumps ----------------------------------------------
+runner/torch_compile_debug/
+
+# --- Editors / OS -----------------------------------------------------------
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# --- Misc -------------------------------------------------------------------
+*.log
+
+# --- Local tooling ----------------------------------------------------------
+.freebuff/
