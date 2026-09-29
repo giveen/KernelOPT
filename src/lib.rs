@@ -14,6 +14,7 @@ pub mod llm;
 pub mod memory;
 pub mod models;
 pub mod ninfer;
+pub mod parse;
 pub mod pipeline;
 pub mod prompts;
 pub mod runner_bridge;

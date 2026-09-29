@@ -432,6 +432,7 @@ impl<'a> CudaPipeline<'a> {
                 3600,
             )
             .context("cuda_compile (configure+build)")?;
+        let cfg = crate::parse::compile_view(&cfg);
         self.journal.record(&Event::StageCompleted {
             stage: "compile_baseline".into(),
             data: json!({"passed": cfg["passed"], "errors": cfg["compiler_errors"]}),
@@ -443,6 +444,7 @@ impl<'a> CudaPipeline<'a> {
         let verify = self
             .call_timeout(self.verify_command(), self.verify_request(), 1800)
             .context("verify (baseline)")?;
+        let verify = crate::parse::verify_view(&verify, self.target.backend);
         self.journal.record(&Event::StageCompleted {
             stage: "verify_baseline".into(),
             data: json!({"passed": verify["passed"], "failing": verify["failing_cases"]}),
@@ -506,6 +508,7 @@ impl<'a> CudaPipeline<'a> {
             .run_dir
             .join("ncu")
             .join(format!("{}.csv", uuid::Uuid::new_v4().simple()));
+        let report_path = report.clone();
         let req = match self.target.backend {
             Backend::Ninfer => json!({
                 "build_dir": self.build_dir,
@@ -514,7 +517,7 @@ impl<'a> CudaPipeline<'a> {
                 "ncu_set": self.ncu_set,
                 "launch_skip": 5,
                 "launch_count": 1,
-                "report_path": report,
+                "report_path": report_path,
                 "timeout_s": 1200,
             }),
             Backend::Llamacpp => json!({
@@ -523,16 +526,58 @@ impl<'a> CudaPipeline<'a> {
                 "ncu_set": self.ncu_set,
                 "launch_skip": 3,
                 "launch_count": 1,
-                "report_path": report,
+                "report_path": report_path,
                 "timeout_s": 1200,
             }),
         };
         match self.gpu_call_timeout(self.ncu_command(), req, 1500) {
             Ok(resp) if resp["ok"] == json!(true) => {
-                let ctx = analyst::planning_context(&resp["context"], 3);
+                // ncu CSV parsing lives in Rust now.
+                let csv = crate::parse::extract_ncu_csv(resp["raw_stdout"].as_str().unwrap_or(""));
+                let mut context = crate::parse::parse_ncu_csv(&csv);
+                if context["kernels"]
+                    .as_array()
+                    .map(|a| a.is_empty())
+                    .unwrap_or(true)
+                {
+                    let combined = format!(
+                        "{}{}",
+                        resp["raw_stdout"].as_str().unwrap_or(""),
+                        resp["raw_stderr"].as_str().unwrap_or("")
+                    );
+                    let note = if combined.contains("ERR_NVGPUCTRPERM") {
+                        "ERR_NVGPUCTRPERM: GPU performance counters are admin-only \
+                         (RmProfilingAdminOnly=1). Set NVreg_RmProfilingAdminOnly=0 and reload."
+                            .to_string()
+                    } else {
+                        let tail: String = combined
+                            .chars()
+                            .rev()
+                            .take(600)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        format!(
+                            "ncu produced no kernel data (exit {}): {tail}",
+                            resp["exit_code"]
+                        )
+                    };
+                    let _ = self.journal.record(&Event::StageCompleted {
+                        stage: "profile".into(),
+                        data: json!({"available": false, "note": note}),
+                    });
+                    return None;
+                }
+                if !csv.trim().is_empty() {
+                    let _ = std::fs::write(&report, &csv);
+                    context["raw_csv_path"] = json!(report.to_string_lossy());
+                }
+                context["ncu_command"] = resp["command"].clone();
+                let ctx = analyst::planning_context(&context, 3);
                 let _ = self.journal.record(&Event::StageCompleted {
                     stage: "profile".into(),
-                    data: json!({"kernels": ctx["kernels"], "raw_csv": resp["context"]["raw_csv_path"]}),
+                    data: json!({"kernels": ctx["kernels"], "raw_csv": context["raw_csv_path"]}),
                 });
                 Some(ctx)
             }
@@ -935,6 +980,7 @@ impl<'a> CudaPipeline<'a> {
                 }),
                 3600,
             )?;
+            let compile = crate::parse::compile_view(&compile);
             if compile["passed"] != json!(true) {
                 let err = format_compiler_errors(&compile);
                 self.progress(format!("  c{chain_idx} ✗ compile: {}", flatten(&err)));
@@ -952,6 +998,7 @@ impl<'a> CudaPipeline<'a> {
 
             let verify = self
                 .gpu_call_timeout(self.verify_command(), self.verify_request(), 1800)?;
+            let verify = crate::parse::verify_view(&verify, self.target.backend);
             if verify["passed"] != json!(true) {
                 let err = format_verify_failure(&verify);
                 self.progress(format!("  c{chain_idx} ✗ correctness: {}", flatten(&err)));
@@ -1519,6 +1566,7 @@ impl<'a> CudaPipeline<'a> {
             "cuda_diff",
             json!({"worktree": self.worktree, "base": self.base_sha.clone().unwrap_or_else(|| "HEAD".into()), "paths": [self.target.target_file]}),
         )?;
+        let diff_stat = crate::parse::numstat_view(&diff);
         let diff_text = diff["diff"].as_str().unwrap_or("");
         let diff_path = self.run_dir.join("report.diff");
         let _ = std::fs::write(&diff_path, diff_text);
@@ -1544,9 +1592,9 @@ impl<'a> CudaPipeline<'a> {
                           "runs": 3,
                           "rounds": rounds,
                           "wins": wins},
-                "diff_files": diff["file_count"],
-                "diff_insertions": diff["insertions"],
-                "diff_deletions": diff["deletions"],
+                "diff_files": diff_stat["file_count"],
+                "diff_insertions": diff_stat["insertions"],
+                "diff_deletions": diff_stat["deletions"],
                 "diff_path": diff_path,
                 "stop_reason": stop_reason,
                 "iterations": iterations,
@@ -1765,16 +1813,18 @@ impl<'a> CudaPipeline<'a> {
     // ---------- finalize helpers ----------
 
     fn compile_now(&self) -> Result<serde_json::Value> {
-        self.call_timeout(
+        let resp = self.call_timeout(
             "cuda_compile",
             json!({"worktree": self.worktree, "build_dir": self.build_dir,
                    "targets": self.compile_targets(), "jobs": num_cpus()}),
             3600,
-        )
+        )?;
+        Ok(crate::parse::compile_view(&resp))
     }
 
     fn verify_now(&self) -> Result<serde_json::Value> {
-        self.gpu_call_timeout(self.verify_command(), self.verify_request(), 1800)
+        let resp = self.gpu_call_timeout(self.verify_command(), self.verify_request(), 1800)?;
+        Ok(crate::parse::verify_view(&resp, self.target.backend))
     }
 
     fn revert_ref(&self, r: &str) -> Result<()> {

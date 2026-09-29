@@ -82,18 +82,13 @@ def llama_verify(request: dict) -> dict:
     except Exception as exc:  # subprocess.TimeoutExpired / OSError
         return _err("timeout", f"llama_verify failed: {exc}")
 
-    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    parsed = parse_verify_output(text)
-    passed = proc.returncode == 0 and parsed["ok_counts"] and not parsed["failing_cases"]
     return {
         "ok": True,
-        "passed": passed,
+        "passed": proc.returncode == 0,
         "exit_code": proc.returncode,
         "ops": request.get("ops") or [],
-        "tests_passed": parsed["tests_passed"],
-        "tests_total": parsed["tests_total"],
-        "failing_cases": parsed["failing_cases"],
-        "suite_output": text[-8000:],
+        "raw_stdout": proc.stdout or "",
+        "raw_stderr": proc.stderr or "",
     }
 
 

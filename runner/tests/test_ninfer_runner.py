@@ -262,7 +262,8 @@ def test_cuda_verify_add_bias_real():
     )
     assert resp["ok"] is True, resp
     assert resp["passed"] is True, resp
-    assert any(c["name"] == "ninfer_add_bias_test" for c in resp["cases"])
+    # Parsing (ctest statuses) lives in Rust now; the runner returns raw output.
+    assert "ninfer_add_bias_test" in resp["raw_stdout"]
 
 
 @needs_build

@@ -339,8 +339,9 @@ def cuda_compile(request: dict) -> dict:
                 "ok": True,
                 "passed": False,
                 "stage": "configure",
-                "compiler_errors": parse_compiler_errors(cfg.stderr),
-                "raw_tail": (cfg.stdout + cfg.stderr)[-4000:],
+                "exit_code": cfg.returncode,
+                "raw_stdout": cfg.stdout or "",
+                "raw_stderr": cfg.stderr or "",
             }
 
     cmd = ["cmake", "--build", build_dir, "-j", str(jobs)]
@@ -351,16 +352,13 @@ def cuda_compile(request: dict) -> dict:
     except subprocess.TimeoutExpired:
         return _err("timeout", f"cmake --build timed out after {timeout}s")
 
-    combined = (proc.stderr or "") + "\n" + (proc.stdout or "")
-    errors = [e for e in parse_compiler_errors(combined) if e["severity"] != "warning"]
     return {
         "ok": True,
         "passed": proc.returncode == 0,
         "exit_code": proc.returncode,
         "targets": targets,
-        "compiler_errors": errors,
-        "diagnostic_count": len(parse_compiler_errors(combined)),
-        "raw_tail": combined[-4000:],
+        "raw_stdout": proc.stdout or "",
+        "raw_stderr": proc.stderr or "",
     }
 
 
@@ -410,15 +408,13 @@ def cuda_verify(request: dict) -> dict:
 
     combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
     parsed = parse_ctest_output(combined)
-    passed = proc.returncode == 0 and not parsed["failing_cases"]
     return {
         "ok": True,
-        "passed": passed,
+        "passed": proc.returncode == 0 and not parsed["failing_cases"],
         "exit_code": proc.returncode,
         "tests": tests,
-        "cases": parsed["cases"],
-        "failing_cases": parsed["failing_cases"],
-        "suite_output": combined[-8000:],
+        "raw_stdout": proc.stdout or "",
+        "raw_stderr": proc.stderr or "",
     }
 
 
@@ -707,28 +703,14 @@ def cuda_ncu(request: dict) -> dict:
     except subprocess.TimeoutExpired:
         return _err("timeout", f"ncu timed out after {timeout}s")
 
-    csv_text = _extract_csv(proc.stdout or "")
-    context = parse_ncu_csv(csv_text) if csv_text.strip() else {"kernels": [], "rules": []}
-    if not context["kernels"]:
-        combined = (proc.stdout or "") + (proc.stderr or "")
-        if "ERR_NVGPUCTRPERM" in combined:
-            return _err(
-                "runtime",
-                "ERR_NVGPUCTRPERM: GPU performance counters are admin-only "
-                "(RmProfilingAdminOnly=1). Set NVreg_RmProfilingAdminOnly=0 and reload.",
-            )
-        return _err(
-            "runtime",
-            f"ncu produced no kernel data (exit {proc.returncode}): " + combined[-600:],
-        )
-
-    if report and csv_text.strip():
-        os.makedirs(os.path.dirname(os.path.abspath(report)), exist_ok=True)
-        with open(report, "w") as f:
-            f.write(csv_text)
-        context["raw_csv_path"] = report
-    context["ncu_command"] = " ".join(cmd)
-    return {"ok": True, "context": context}
+    # Parsing (CSV extraction + SOL metrics) lives in Rust now.
+    return {
+        "ok": True,
+        "exit_code": proc.returncode,
+        "command": " ".join(cmd),
+        "raw_stdout": proc.stdout or "",
+        "raw_stderr": proc.stderr or "",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -820,4 +802,4 @@ def cuda_diff(request: dict) -> dict:
     if diff.returncode != 0:
         return _err("runtime", f"git diff failed: {diff.stderr.strip()[-600:]}")
     summary = parse_numstat(stat.stdout)
-    return {"ok": True, "diff": diff.stdout, "base": base, **summary}
+    return {"ok": True, "diff": diff.stdout, "base": base, "numstat_raw": stat.stdout or "", **summary}
