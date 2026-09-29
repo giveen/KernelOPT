@@ -191,7 +191,7 @@ enum Cmd {
     Campaign {
         /// Target checkout (env: NINFER_REPO/LLAMACPP_REPO).
         #[arg(long)]
-        repo: String,
+        repo: Option<String>,
         /// Backend: auto | ninfer | llamacpp.
         #[arg(long, default_value = "auto")]
         mode: String,
@@ -680,8 +680,11 @@ fn main() -> Result<()> {
             llm: llm_args,
             loop_,
         } => {
-            let repo = std::fs::canonicalize(kernelopt::dotenv::expand_tilde(&repo))
-                .with_context(|| format!("repo not found: {repo}"))?;
+            let repo = resolve_repo(
+                repo,
+                &["NINFER_REPO", "LLAMACPP_REPO"],
+                "NINFER_REPO or LLAMACPP_REPO",
+            )?;
             let backend = backend::resolve_backend(&repo, Some(&mode))?;
             let cfg = load_cuda_config(&llm_args, &loop_, ProfilerMode::Ncu, ncu_set)?;
             let client = build_llm(&cfg);
