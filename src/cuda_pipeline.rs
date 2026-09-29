@@ -1108,7 +1108,14 @@ impl<'a> CudaPipeline<'a> {
             Err(e) => return self.finish_fallback(&format!("baseline failed: {e:#}")),
         };
 
-        let profiling_ctx = self.stage_profile().unwrap_or(json!({"ncu": null}));
+        let mut profiling_ctx = self.stage_profile().unwrap_or(json!({"ncu": null}));
+        // Tell the planner which shape the Gate-4 bench actually measures — the
+        // NCU profile above may be a different launch/shape.
+        profiling_ctx["measurement"] = json!({
+            "gate_shape": self.last_bench_label,
+            "gate_baseline_ms": baseline_ms,
+            "note": "Gate 4 measures THIS shape (median of repeats). The NCU profile above may be a different launch; plan for the measured shape's regime.",
+        });
         let baseline_source = std::fs::read_to_string(self.target_path())
             .context("reading baseline kernel from worktree")?;
 
