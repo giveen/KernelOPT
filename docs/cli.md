@@ -113,7 +113,7 @@ iterating until it has gone 2 iterations without a ≥1%-improvement, *or* it
 reaches 1.2×, *or* it hits 25 iterations, *or* the 8-hour campaign deadline
 arrives — whichever happens first.
 
-### `run` / `run-ninfer` / `run-llamacpp` — one target, four gates
+### `run` / `run-ninfer` / `run-llamacpp` — one target, five gates
 
 All three run the same pipeline on a single target and write a journal + report:
 
@@ -122,10 +122,21 @@ All three run the same pipeline on a single target and write a journal + report:
 2. **Loop** — Planner proposes, Executor edits the one kernel file, compile
    (Gate 1) → correctness (Gate 2) → bench; errors are fed back for up to K
    retries; every candidate is journaled.
-3. **Finalize** — restore the winner, rebuild/re-test, Gate 4 perf (`≤ γ ×
-   baseline`), and for `run-ninfer` optionally Gate 3 (`--e2e-weights`).
+3. **Finalize** — restore the winner, rebuild/re-test (Gate 1–2), then:
+   - **Gate 4 perf** on a pinned shape with 3 repeats and interleaved fresh
+     baseline/candidate rounds (`--final-rounds`); a win must clear the measured
+     noise, win every round, and be *physically plausible* (not above a generous
+     multiple of the memory roofline — otherwise it is "doing less work").
+   - **Gate 5 measured-shape correctness** — the measured shape is appended to the
+     op's test and run against baseline and candidate (ninfer; unsupported tests
+     skip). Rejects a candidate that is correct on the suite but wrong at the shape.
+   - for `run-ninfer`, optionally **Gate 3** model-level verification
+     (`--e2e-weights`).
 4. **Artifact** — a unified diff (`report.diff`) and `report.md`; the user's tree
    is never modified.
+
+Bench/verify/NCU/E2E take an exclusive cross-process lock (`.kernelopt/gpu.lock`),
+so only one GPU job runs at a time, even across separate `kernelopt` processes.
 
 Differences: `run` operates on a compiled PyTorch model (Triton kernels, eager
 `allclose` correctness, `do_bench` timing); `run-ninfer` on a ninfer Op (ctest +
