@@ -379,6 +379,7 @@ fn run_one_target(
         target,
         worktree,
         build_dir,
+        gpu_lock_path: crate::gpu_lock::default_path(&project_root),
         run_dir,
         ncu_set: opts.ncu_set.clone(),
         e2e: opts.e2e.clone(),

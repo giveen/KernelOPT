@@ -7,6 +7,7 @@ pub mod campaign;
 pub mod config;
 pub mod cuda_pipeline;
 pub mod dotenv;
+pub mod gpu_lock;
 pub mod journal;
 pub mod llamacpp;
 pub mod llm;

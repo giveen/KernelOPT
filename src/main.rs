@@ -1145,6 +1145,7 @@ fn run_single(
         target,
         worktree,
         build_dir,
+        gpu_lock_path: kernelopt::gpu_lock::default_path(&project_root),
         run_dir,
         ncu_set: opts.ncu_set,
         edit_mode: opts.edit_mode,

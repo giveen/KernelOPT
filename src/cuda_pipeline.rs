@@ -51,6 +51,8 @@ pub struct CudaPipeline<'a> {
     pub target: Target,
     pub worktree: PathBuf,
     pub build_dir: PathBuf,
+    /// Cross-process lockfile that serializes GPU work (bench/verify/ncu/e2e).
+    pub gpu_lock_path: PathBuf,
     pub run_dir: PathBuf,
     pub ncu_set: String,
     /// How the Executor edits the file (full-file or unified diff).
@@ -196,6 +198,20 @@ impl<'a> CudaPipeline<'a> {
         secs: u64,
     ) -> Result<serde_json::Value> {
         req["command"] = json!(command);
+        self.runner.call_with_timeout(&req, secs)
+    }
+
+    /// Run a GPU-touching runner command under the cross-process GPU lock, so
+    /// only one bench/verify/ncu/e2e runs on the device at a time (also across
+    /// separate `kernelopt` processes).
+    fn gpu_call_timeout(
+        &self,
+        command: &str,
+        mut req: serde_json::Value,
+        secs: u64,
+    ) -> Result<serde_json::Value> {
+        req["command"] = json!(command);
+        let _guard = crate::gpu_lock::lock(&self.gpu_lock_path)?;
         self.runner.call_with_timeout(&req, secs)
     }
 
@@ -349,7 +365,7 @@ impl<'a> CudaPipeline<'a> {
     /// Run the engine (deterministic greedy generation) and capture its result.
     fn run_engine(&self) -> Result<E2eResult> {
         let e2e = self.e2e.as_ref().context("no engine E2E config")?;
-        let resp = self.call_timeout(
+        let resp = self.gpu_call_timeout(
             "engine_generate",
             json!({
                 "build_dir": self.build_dir,
@@ -468,7 +484,7 @@ impl<'a> CudaPipeline<'a> {
             .run_dir
             .join("bench")
             .join(format!("{}.csv", uuid::Uuid::new_v4().simple()));
-        let resp = self.call_timeout(self.bench_command(), self.bench_request(&csv), 1800)?;
+        let resp = self.gpu_call_timeout(self.bench_command(), self.bench_request(&csv), 1800)?;
         if resp["ok"] != json!(true) || resp["passed"] != json!(true) {
             anyhow::bail!("bench failed: {}", resp["error"].clone());
         }
@@ -511,7 +527,7 @@ impl<'a> CudaPipeline<'a> {
                 "timeout_s": 1200,
             }),
         };
-        match self.call_timeout(self.ncu_command(), req, 1500) {
+        match self.gpu_call_timeout(self.ncu_command(), req, 1500) {
             Ok(resp) if resp["ok"] == json!(true) => {
                 let ctx = analyst::planning_context(&resp["context"], 3);
                 let _ = self.journal.record(&Event::StageCompleted {
@@ -935,7 +951,7 @@ impl<'a> CudaPipeline<'a> {
             }
 
             let verify = self
-                .call_timeout(self.verify_command(), self.verify_request(), 1800)?;
+                .gpu_call_timeout(self.verify_command(), self.verify_request(), 1800)?;
             if verify["passed"] != json!(true) {
                 let err = format_verify_failure(&verify);
                 self.progress(format!("  c{chain_idx} ✗ correctness: {}", flatten(&err)));
@@ -1758,7 +1774,7 @@ impl<'a> CudaPipeline<'a> {
     }
 
     fn verify_now(&self) -> Result<serde_json::Value> {
-        self.call_timeout(self.verify_command(), self.verify_request(), 1800)
+        self.gpu_call_timeout(self.verify_command(), self.verify_request(), 1800)
     }
 
     fn revert_ref(&self, r: &str) -> Result<()> {

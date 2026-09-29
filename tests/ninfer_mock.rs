@@ -89,6 +89,7 @@ fn ninfer_identity_walk_add_bias() {
         target,
         worktree,
         build_dir,
+        gpu_lock_path: kernelopt::gpu_lock::default_path(std::path::Path::new(".")),
         run_dir,
         ncu_set: "basic".into(),
         e2e: None,
