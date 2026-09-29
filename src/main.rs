@@ -1533,6 +1533,14 @@ fn print_winner(events: &[Event]) {
                 "           {sp:.2}x = baseline/final: latency fell to {:.0}% of baseline",
                 100.0 / sp
             );
+            if let (Some(g), Some(r)) = (m["cand_gbs"].as_f64(), m["roofline_gbs"].as_f64()) {
+                if r > 0.0 {
+                    println!(
+                        "           {g:.0} GB/s = {:.0}% of the {r:.0} GB/s memory roofline",
+                        g / r * 100.0
+                    );
+                }
+            }
         }
     } else if let (Some(ms), Some(base)) = (w["latency_ms"].as_f64(), w["baseline_ms"].as_f64()) {
         println!(

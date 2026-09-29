@@ -1697,6 +1697,14 @@ impl<'a> CudaPipeline<'a> {
                     if let Some(n) = m["noise_pct"].as_f64() {
                         s.push_str(&format!("- measurement noise: {:.2}%\n", n * 100.0));
                     }
+                    if let (Some(g), Some(r)) = (m["cand_gbs"].as_f64(), m["roofline_gbs"].as_f64()) {
+                        if r > 0.0 {
+                            s.push_str(&format!(
+                                "- bandwidth: {g:.0} GB/s = {:.0}% of the {r:.0} GB/s memory roofline\n",
+                                g / r * 100.0
+                            ));
+                        }
+                    }
                 }
             }
             s.push_str(&format!("\n**Plan:** {}\n", w["plan"].as_str().unwrap_or("")));
