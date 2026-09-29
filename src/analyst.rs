@@ -27,12 +27,17 @@ impl Tier {
 }
 
 /// Paper thresholds: either SOL > 80% → near-optimal; else compare the two.
+/// Extension: when BOTH are very low the kernel is latency/launch-bound
+/// (underutilized), not DRAM-limited — steer the planner accordingly.
 pub fn classify_tier(sol_memory: Option<f64>, sol_compute: Option<f64>) -> Tier {
     const NEAR_OPTIMAL: f64 = 80.0;
+    const LOW: f64 = 25.0;
     let mem = sol_memory.unwrap_or(0.0);
     let comp = sol_compute.unwrap_or(0.0);
     if mem > NEAR_OPTIMAL || comp > NEAR_OPTIMAL {
         Tier::NearOptimal
+    } else if mem < LOW && comp < LOW {
+        Tier::Underutilized
     } else if mem > comp {
         Tier::MemoryBound
     } else if comp > mem {
@@ -99,6 +104,8 @@ mod tests {
         assert_eq!(classify_tier(Some(70.0), Some(40.0)), Tier::MemoryBound);
         assert_eq!(classify_tier(Some(40.0), Some(70.0)), Tier::ComputeBound);
         assert_eq!(classify_tier(Some(50.0), Some(50.0)), Tier::Underutilized);
+        // Both very low => latency/launch-bound, not memory-bound.
+        assert_eq!(classify_tier(Some(10.9), Some(0.1)), Tier::Underutilized);
     }
 
     #[test]

@@ -871,6 +871,23 @@ impl<'a> CudaPipeline<'a> {
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or_else(|| diff_summary(kernel_source, &candidate_source)),
             );
+            // A byte-identical submission is a no-op: reject it and force a real
+            // change rather than letting it become the "winner".
+            if candidate_source == kernel_source {
+                let err = "submission is byte-identical to the current file — \
+                           the optimization appears already present; propose a DIFFERENT change."
+                    .to_string();
+                self.progress(format!("  c{chain_idx} ✗ no-op: {}", flatten(&err)));
+                self.journal.record(&Event::AttemptFailed {
+                    iteration,
+                    chain: chain_idx,
+                    attempt,
+                    category: "no_change".into(),
+                    error: err.clone(),
+                })?;
+                last_error = Some(err);
+                continue;
+            }
             self.progress(format!(
                 "  c{chain_idx} exec a{attempt}: {}",
                 flatten(summary.as_deref().unwrap_or("(no summary)"))

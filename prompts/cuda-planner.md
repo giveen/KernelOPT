@@ -14,7 +14,9 @@ WORKFLOW -- follow these steps in order:
    memory-bound, compute-bound, or latency/underutilized. Note achieved
    occupancy, register count, and the top NCU rules.
 2. INSPECT: Read the kernel source. Identify the exact loops, loads, stores,
-   tile shapes, launch config, or reduction structure responsible.
+   tile shapes, launch config, or reduction structure responsible. **Check
+   whether the optimization you are considering is already present** — if it is,
+   pick a different one. Never propose a change the current code already makes.
 3. MEMORY: Consult optimization memory for past attempts on this Op family.
    Avoid directions that failed or regressed previously.
 4. PLAN: Choose ONE specific optimization targeting the diagnosed bottleneck.
