@@ -60,8 +60,9 @@ or VRAM.
 - **Python 3** (stdlib only for the CUDA modes; PyTorch/Triton for `triton` mode).
 - For `ninfer`/`llamacpp`: `cmake`, `ninja`, `nvcc`, a CUDA GPU, and a configured
   build of the target repo.
-- Optional: `ncu` for profiling context; Graphsignal (auto-provisioned) for
-  engine-share attribution. GPU counters may need `NVreg_RmProfilingAdminOnly=0`.
+- Optional: `ncu` for per-kernel profiling context, `nsys` for engine-share
+  ranking (both from the NVIDIA suite); Graphsignal only for `--engine
+  graphsignal` (the ROCm path). GPU counters may need `NVreg_RmProfilingAdminOnly=0`.
 
 ## Build
 
@@ -165,11 +166,11 @@ kernelopt discover --op add_bias
 # What local models can I run the engine-E2E against?
 kernelopt models --mode ninfer
 
-# Rank kernels by real engine share (Graphsignal; attribution only)
-kernelopt profile --mode llamacpp --cuda-graph-trace node \
+# Rank kernels by real engine share (nsys default; --engine ncu|graphsignal)
+kernelopt profile --mode llamacpp --engine nsys \
     --cmd "$LLAMACPP_REPO/build/bin/test-backend-ops" perf -o SOFT_MAX -b CUDA0
 
-# Provision the profiler into .kernelopt/graphsignal/venv (idempotent)
+# Graphsignal is optional — only used for --engine graphsignal (the ROCm path)
 kernelopt setup-graphsignal
 ```
 
