@@ -1478,6 +1478,27 @@ impl<'a> CudaPipeline<'a> {
         let speedup = final_ms.map(|_| verdict.speedup);
         let within_noise = verdict.within_noise;
 
+        // Gate 5: correctness at the *measured* shape. The op's canned test suite
+        // may not cover the launch path the bench shape exercises (a real false
+        // positive skipped 3/4 of the rows, passed the suite, and looked 22x
+        // faster). Runs for any repeatable perf win; self-validates against the
+        // baseline, so an unsupported test simply degrades to "skipped".
+        let perf_win = verdict.gate4
+            && verdict.improvement > self.min_improvement
+            && !verdict.within_noise
+            && (rounds == 0 || wins == rounds);
+        let shape_gate = if perf_win {
+            self.shape_consistency_gate(&best)?
+        } else {
+            ShapeGate::Skipped("no repeatable perf win to verify".into())
+        };
+        let shape_ok = !matches!(shape_gate, ShapeGate::Failed(_));
+        self.journal.record(&Event::GatesVerdict {
+            stage: "shape".into(),
+            passed: shape_ok,
+            detail: shape_gate.detail(),
+        })?;
+
         let diff = self.call(
             "cuda_diff",
             json!({"worktree": self.worktree, "base": self.base_sha.clone().unwrap_or_else(|| "HEAD".into()), "paths": [self.target.target_file]}),
@@ -1486,13 +1507,14 @@ impl<'a> CudaPipeline<'a> {
         let diff_path = self.run_dir.join("report.diff");
         let _ = std::fs::write(&diff_path, diff_text);
 
-        let passed = gate1_2 && gate3 && gate4;
+        let passed = gate1_2 && gate3 && gate4 && shape_ok;
         self.journal.record(&Event::GatesVerdict {
             stage: "gates".into(),
             passed,
             detail: json!({
                 "gate1_2": gate1_2,
                 "gate3": gate3,
+                "gate5_shape": shape_gate.detail(),
                 "gate4": {"passed": gate4, "final_ms": final_ms,
                           "baseline_ms": baseline_final_ms,
                           "baseline_ms_initial": baseline_ms,
@@ -1532,6 +1554,14 @@ impl<'a> CudaPipeline<'a> {
             } else {
                 ("matched", None)
             }
+        } else if !shape_ok {
+            (
+                "fallback",
+                Some(format!(
+                    "candidate is correct on the op's suite but fails the measured shape {} (baseline preserved)",
+                    self.last_bench_label.as_deref().unwrap_or("?")
+                )),
+            )
         } else if !gate1_2 {
             ("fallback", Some("winner failed to rebuild/re-test (baseline preserved)".into()))
         } else if !gate4 {
@@ -1752,6 +1782,73 @@ impl<'a> CudaPipeline<'a> {
                 Ok(())
             }
         }
+    }
+
+    /// Gate 5: does the candidate compute the right answer at the *measured*
+    /// shape? Extends the op's test with that shape, then runs it against the
+    /// baseline (validating the generated case) and the candidate. Restores the
+    /// test and leaves the worktree at the winner.
+    fn shape_consistency_gate(&mut self, best: &Candidate) -> Result<ShapeGate> {
+        if self.target.backend != Backend::Ninfer || !self.target.timing {
+            return Ok(ShapeGate::Skipped("not a ninfer timing target".into()));
+        }
+        let Some(shape) = parse_bench_shape(self.last_bench_label.as_deref()) else {
+            return Ok(ShapeGate::Skipped("no parseable bench shape".into()));
+        };
+        let mut chosen: Option<(String, String, String)> = None;
+        for rel in &self.target.test_sources {
+            let path = self.worktree.join(rel);
+            let Ok(original) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if let Some(patched) = append_shape_case(&original, &self.target.op, &shape) {
+                chosen = Some((rel.clone(), original, patched));
+                break;
+            }
+        }
+        let Some((rel, original, patched)) = chosen else {
+            return Ok(ShapeGate::Skipped("no extendable run_case test found".into()));
+        };
+        let path = self.worktree.join(&rel);
+        let base_ref = self.base_sha.clone().unwrap_or_else(|| "HEAD".into());
+
+        // 1) Validate the generated case against the baseline (trusted-correct).
+        self.revert_ref(&base_ref)?;
+        std::fs::write(&path, &patched)?;
+        let _ = self.compile_now()?;
+        let base = self.verify_now()?;
+
+        // 2) The same case against the candidate.
+        self.materialize_winner(best)?;
+        std::fs::write(&path, &patched)?;
+        let _ = self.compile_now()?;
+        let cand = self.verify_now()?;
+
+        // Restore the test and leave the worktree at the winner for the diff.
+        std::fs::write(&path, &original)?;
+        self.materialize_winner(best)?;
+        let _ = self.compile_now()?;
+
+        let base_passed = base["passed"] == json!(true);
+        let cand_passed = cand["passed"] == json!(true);
+        let detail = json!({
+            "shape": self.last_bench_label,
+            "case_dims": shape,
+            "source": rel,
+            "baseline_passed": base_passed,
+            "candidate_passed": cand_passed,
+            "baseline_failures": base["failing_cases"],
+            "candidate_failures": cand["failing_cases"],
+        });
+        if !base_passed {
+            return Ok(ShapeGate::Skipped(format!(
+                "baseline failed the generated case (gate not used): {detail}"
+            )));
+        }
+        if !cand_passed {
+            return Ok(ShapeGate::Failed(detail));
+        }
+        Ok(ShapeGate::Passed(detail))
     }
 
     fn reset_worktree(&self) -> Result<()> {        let base = self.base_sha.clone().unwrap_or_else(|| "HEAD".to_string());
@@ -2067,6 +2164,173 @@ pub fn performance_verdict(
     }
 }
 
+/// Outcome of Gate 5 (correctness at the *measured* shape).
+#[derive(Debug, Clone, PartialEq)]
+enum ShapeGate {
+    /// Not applicable or not trustworthy, with a reason.
+    Skipped(String),
+    Passed(serde_json::Value),
+    Failed(serde_json::Value),
+}
+
+impl ShapeGate {
+    fn detail(&self) -> serde_json::Value {
+        match self {
+            ShapeGate::Skipped(why) => json!({"status": "skipped", "reason": why}),
+            ShapeGate::Passed(d) => json!({"status": "passed", "detail": d}),
+            ShapeGate::Failed(d) => json!({"status": "failed", "detail": d}),
+        }
+    }
+}
+
+/// Parse the shape tuple out of a bench label, e.g. `add_bias [4304,4096 ]`.
+fn parse_bench_shape(label: Option<&str>) -> Option<Vec<i64>> {
+    let label = label?;
+    let open = label.rfind('[')?;
+    let close = open + label[open..].find(']')?;
+    let dims: Vec<i64> = label[open + 1..close]
+        .split(',')
+        .filter_map(|s| s.trim().parse::<i64>().ok())
+        .collect();
+    (dims.len() >= 2).then_some(dims)
+}
+
+/// Split on top-level commas (ignoring commas inside quotes or brackets).
+fn split_top_level(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut cur = String::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '\\' if in_str => {
+                cur.push(c);
+                if let Some(n) = it.next() {
+                    cur.push(n);
+                }
+            }
+            '"' => {
+                in_str = !in_str;
+                cur.push(c);
+            }
+            '(' | '{' | '[' if !in_str => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' | '}' | ']' if !in_str => {
+                depth -= 1;
+                cur.push(c);
+            }
+            ',' if !in_str && depth == 0 => {
+                out.push(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out
+}
+
+/// Byte offset of the `)` matching the `(` at byte offset `open_byte`.
+fn matching_paren(s: &str, open_byte: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut it = s.get(open_byte..)?.char_indices();
+    while let Some((off, c)) = it.next() {
+        if in_str {
+            match c {
+                '\\' => {
+                    it.next();
+                }
+                '"' => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open_byte + off);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Append an extra `run_case(...)` for the measured shape to a ninfer op test.
+///
+/// Reuses the *last* existing call so argument positions are preserved (the
+/// op tests have varied signatures), and only when the signature is the common
+/// `run_case(<label>, <int dims...>, ...)`. Returns `None` otherwise, and the
+/// caller then skips the gate. The result is self-validated against the
+/// baseline before it is trusted, so a wrong guess cannot reject a good candidate.
+fn append_shape_case(source: &str, op: &str, shape: &[i64]) -> Option<String> {
+    // 1) Signature: the leading run of integer params after the label param.
+    let sig_at = source.find("int run_case(")?;
+    let after = &source[sig_at + "int run_case".len()..];
+    let sig_open = after.find('(')?;
+    let sig_close = matching_paren(after, sig_open)?;
+    let params = split_top_level(&after[sig_open + 1..sig_close]);
+    if params.is_empty()
+        || !(params[0].contains("char*") || params[0].contains("string") || params[0].contains("string_view"))
+    {
+        return None;
+    }
+    let is_int = |p: &str| {
+        let ty = p.split('=').next().unwrap_or("").trim();
+        let first = ty.split_whitespace().next().unwrap_or(ty);
+        let first = first.trim_end_matches(['*', '&']);
+        matches!(
+            first,
+            "std::int32_t" | "int32_t" | "std::int64_t" | "int64_t" | "std::int16_t" | "int16_t" | "int"
+        )
+    };
+    let n_shape = params[1..].iter().take_while(|p| is_int(p)).count();
+    if n_shape == 0 || n_shape != shape.len() {
+        return None;
+    }
+
+    // 2) Reuse the last `run_case(...)` call line, substituting the shape args.
+    let call_line = source
+        .lines()
+        .rev()
+        .find(|l| l.contains("run_case(") && l.contains('"') && !l.trim_start().starts_with("int run_case"))?;
+    let call_at = call_line.find("run_case(")?;
+    let args_open = call_at + "run_case(".len() - 1;
+    let args_close = matching_paren(call_line, args_open)?;
+    let mut args = split_top_level(&call_line[args_open + 1..args_close]);
+    if args.len() < 1 + n_shape {
+        return None;
+    }
+    for (i, v) in shape.iter().enumerate() {
+        args[1 + i] = v.to_string();
+    }
+    let dims = shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(",");
+    args[0] = format!("\"{op} [{dims}] measured-shape\"");
+    let prefix = &call_line[..call_at];
+    let tail = &call_line[args_close + 1..];
+    let new_line = format!("{prefix}run_case({}){}", args.join(", "), tail);
+
+    // 3) Insert right after the reused call.
+    let pos = source.rfind(call_line)?;
+    let line_end = source[pos..].find('\n').map(|i| pos + i + 1).unwrap_or(source.len());
+    let mut out = String::with_capacity(source.len() + new_line.len() + 1);
+    out.push_str(&source[..line_end]);
+    out.push_str(&new_line);
+    out.push('\n');
+    out.push_str(&source[line_end..]);
+    Some(out)
+}
+
 fn first_error(compile: &serde_json::Value) -> String {
     compile["compiler_errors"]
         .as_array()
@@ -2252,5 +2516,54 @@ mod tests {
             Some(5_256.0), Some(1_792.0), 4.0,
         );
         assert!(l2.plausible && l2.optimized, "{l2:?}");
+    }
+
+    // ---- Gate 5: measured-shape correctness -------------------------------- //
+
+    #[test]
+    fn bench_shape_parses_from_label() {
+        assert_eq!(parse_bench_shape(Some("add_bias [4304,4096 ]")), Some(vec![4304, 4096]));
+        assert_eq!(parse_bench_shape(Some("gelu [4608,16]")), Some(vec![4608, 16]));
+        assert_eq!(parse_bench_shape(Some("no shape here")), None);
+        assert_eq!(parse_bench_shape(None), None);
+    }
+
+    #[test]
+    fn shape_case_is_appended_for_supported_test() {
+        let src = "\
+int run_case(const char* label, std::int32_t rows, std::int32_t columns, std::uint32_t seed) {
+    return 0;
+}
+int main() {
+    int failures = 0;
+    failures += run_case(\"add_bias [1152,1]\", 1152, 1, 101u);
+    failures += run_case(\"add_bias [4304,257]\", 4304, 257, 301u);
+    return failures;
+}
+";
+        let patched = append_shape_case(src, "add_bias", &[4304, 4096]).unwrap();
+        assert!(
+            patched.contains("run_case(\"add_bias [4304,4096] measured-shape\", 4304, 4096, 301u);"),
+            "{patched}"
+        );
+        // The original calls are preserved.
+        assert!(patched.contains("run_case(\"add_bias [4304,257]\", 4304, 257, 301u);"));
+        // The generated case comes after the reused call.
+        let gen_at = patched.find("measured-shape").unwrap();
+        let orig_at = patched.find("[4304,257]").unwrap();
+        assert!(gen_at > orig_at);
+    }
+
+    #[test]
+    fn shape_case_skips_unsupported_signatures() {
+        // An enum param before the dims => unsupported (the gate is skipped).
+        let gelu = "int run_case(const char* label, ops::GeluMode mode, std::int32_t rows, std::int32_t columns, std::uint32_t seed) { return 0; }\nint main(){ run_case(\"g\", ops::GeluMode::Tanh, 1, 2, 3u); }";
+        assert!(append_shape_case(gelu, "gelu", &[4, 5]).is_none());
+        // A shape-vector signature => unsupported.
+        let shp = "int run_case(const char* label, const Shape& shape, std::uint32_t seed) { return 0; }\nint main(){ run_case(\"s\", {1,2,3}, 9u); }";
+        assert!(append_shape_case(shp, "l2norm", &[4, 5]).is_none());
+        // A 3-dim shape against a 2-int signature => unsupported.
+        let ab = "int run_case(const char* label, std::int32_t rows, std::int32_t columns, std::uint32_t seed) { return 0; }\nint main(){ run_case(\"a\", 1, 2, 3u); }";
+        assert!(append_shape_case(ab, "add_bias", &[1, 2, 3]).is_none());
     }
 }

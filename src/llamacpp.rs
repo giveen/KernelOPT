@@ -152,6 +152,7 @@ fn build_target(cuda: &Path, op: &str, perf: bool, stems: &[&str]) -> Option<Tar
         target_file,
         build_targets: vec!["ggml-cuda".into(), "test-backend-ops".into()],
         test_filters: vec![op.to_string()],
+        test_sources: Vec::new(),
         bench_binary: None,
         bench_args: Vec::new(),
         timing: perf,

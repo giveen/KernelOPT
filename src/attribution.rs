@@ -114,6 +114,7 @@ mod tests {
             target_file: format!("src/ops/{op}.cu"),
             build_targets: vec![],
             test_filters: vec![],
+            test_sources: vec![],
             bench_binary: None,
             bench_args: vec![],
             timing: true,

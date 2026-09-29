@@ -769,6 +769,12 @@ pub fn to_target(inv: &OpInventory) -> crate::backend::Target {
         .iter()
         .flat_map(|t| t.test_names.clone())
         .collect();
+    let test_sources: Vec<String> = inv
+        .tests
+        .iter()
+        .flat_map(|t| t.sources.clone())
+        .filter(|s| s.ends_with(".cpp") || s.ends_with(".cu"))
+        .collect();
     let bench_binary = inv.benches.first().map(|b| b.target.clone());
     let mut build_targets: Vec<String> = inv.tests.iter().map(|t| t.target.clone()).collect();
     if let Some(b) = &bench_binary {
@@ -788,6 +794,7 @@ pub fn to_target(inv: &OpInventory) -> crate::backend::Target {
         target_file: inv.kernel_files.first().cloned().unwrap_or_default(),
         build_targets,
         test_filters,
+        test_sources,
         bench_binary,
         bench_args: Vec::new(),
         timing: !inv.benches.is_empty(),

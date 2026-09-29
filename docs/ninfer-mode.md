@@ -110,7 +110,17 @@ out: unified diff of the worktree vs base commit (the deliverable the user revie
 3. **V_model**: the paper's E2E model check maps to `ninfer_bench` (whole-engine route) when the
    op is on the engine path — catches the paper's "faster kernel, slower model" trap (dispatch
    overhead, lost fusion). Optional per-run flag for expensive models; default on for P2+ ops.
-4. **V_perf**: `cuda_bench` sweep ≤ γ × baseline sweep.
+4. **V_perf**: `cuda_bench` on a pinned shape, 3 repeats; at finalize, interleaved fresh
+   baseline/candidate rounds with a noise floor and a sign test. A win must also be *physically
+   plausible* — a candidate that appears to move data faster than the device's memory roofline
+   (beyond `4×`, for L2-resident shapes) is rejected, since that almost always means it does less
+   work than the baseline.
+5. **V_shape** (measured-shape correctness): the repo's Op tests may not cover the launch path the
+   pinned bench shape uses. When a repeatable perf win is found, the gate appends that shape as an
+   extra `run_case` to the op's test, rebuilds, and runs it against **both** the baseline and the
+   candidate. The generated case is only trusted if the (correct) baseline passes it; if the
+   candidate then fails, the win is rejected as a `fallback`. Unsupported test signatures degrade
+   to `skipped` (and the roofline guard still applies).
 
 No candidate passes → worktree discarded, report explains root cause (library dominance /
 no headroom / correctness / perf-gate), user tree untouched.

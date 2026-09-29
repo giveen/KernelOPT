@@ -87,6 +87,9 @@ pub struct Target {
     pub build_targets: Vec<String>,
     /// ninfer: ctest names; llamacpp: `-o` op filters.
     pub test_filters: Vec<String>,
+    /// ninfer: the test translation units (for the measured-shape gate).
+    #[serde(default)]
+    pub test_sources: Vec<String>,
     /// ninfer: bench binary target; llamacpp: None (uses `test-backend-ops perf`).
     pub bench_binary: Option<String>,
     /// Extra argv forwarded to the bench invocation.
