@@ -206,6 +206,12 @@ pub fn tail_journal(path: &Path, stop: &std::sync::atomic::AtomicBool) {
                         }
                         if let Ok(e) = serde_json::from_str::<Event>(line) {
                             eprintln!("[{}] {}", chrono::Local::now().format("%H:%M:%S"), format_event(&e));
+                            if let Event::RunFinished { .. } = e {
+                                if let Some(dir) = path.parent() {
+                                    eprintln!("  report:  {}", dir.join("report.md").display());
+                                    eprintln!("  diff:    {}", dir.join("report.diff").display());
+                                }
+                            }
                         }
                     }
                     offset += (last_nl + 1) as u64;

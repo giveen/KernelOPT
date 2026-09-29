@@ -355,6 +355,10 @@ enum Cmd {
         /// Print the existing journal and exit (don't follow).
         #[arg(long)]
         once: bool,
+        /// Keep following after the run finishes (e.g. to watch a campaign's
+        /// next target); by default `watch` stops and prints artifacts.
+        #[arg(long)]
+        follow: bool,
     },
     /// List a run's candidate commits (sha, status, latency, plan).
     History {
@@ -927,12 +931,12 @@ fn main() -> Result<()> {
             Ok(())
         }
 
-        Cmd::Watch { run_id, latest, once } => {
+        Cmd::Watch { run_id, latest, once, follow } => {
             let run_id = match run_id {
                 Some(id) if !latest => id,
                 _ => latest_run()?,
             };
-            watch_run(&run_id, once)
+            watch_run(&run_id, once, follow)
         }
 
         Cmd::History { run_id } => {
@@ -1466,13 +1470,18 @@ fn latest_run() -> Result<String> {
 }
 
 /// Tail a run's journal and print formatted progress (like `tail -f`).
-fn watch_run(run_id: &str, once: bool) -> Result<()> {
-    let path = mock_runs_dir()?.join(run_id).join("journal.jsonl");
+/// Stops once the run reports `RunFinished` (unless `follow`), then prints the
+/// winner and the artifact paths so the diff is easy to find.
+fn watch_run(run_id: &str, once: bool, follow: bool) -> Result<()> {
+    let run_dir = mock_runs_dir()?.join(run_id);
+    let path = run_dir.join("journal.jsonl");
     if !path.exists() {
         anyhow::bail!("no journal at {} (is the run id right?)", path.display());
     }
     println!("watching {run_id} — Ctrl-C to stop");
     let mut offset = 0u64;
+    let mut events: Vec<Event> = Vec::new();
+    let mut finished = false;
     loop {
         if let Ok(text) = std::fs::read_to_string(&path) {
             let bytes = text.len() as u64;
@@ -1485,16 +1494,27 @@ fn watch_run(run_id: &str, once: bool) -> Result<()> {
                         }
                         if let Ok(e) = serde_json::from_str::<Event>(line) {
                             println!("{}", format_event(&e));
+                            if matches!(e, Event::RunFinished { .. }) {
+                                finished = true;
+                            }
+                            events.push(e);
                         }
                     }
                     offset += (last_nl + 1) as u64;
                 }
             }
         }
-        if once {
+        if once || (finished && !follow) {
             break;
         }
         std::thread::sleep(Duration::from_millis(500));
+    }
+    if finished {
+        print_winner(&events);
+        println!("\nartifacts:");
+        println!("  report:  {}", run_dir.join("report.md").display());
+        println!("  diff:    {}", run_dir.join("report.diff").display());
+        println!("  journal: {}", path.display());
     }
     Ok(())
 }
