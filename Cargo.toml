@@ -3,6 +3,7 @@ name = "kernelopt"
 version = "0.1.0"
 edition = "2021"
 description = "Dispatch-aware agentic GPU kernel optimization for compiled PyTorch models, ninfer CUDA Ops, and llama.cpp ggml-cuda kernels"
+license = "Apache-2.0"
 
 [dependencies]
 anyhow = "1"

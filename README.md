@@ -175,6 +175,10 @@ prompts/                   agent prompts
 docs/                      this directory
 ```
 
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
+
 ## References
 
 - Paper: **KernelOPT: Dispatch-Aware Agentic Search for GPU Kernel Optimization**,
