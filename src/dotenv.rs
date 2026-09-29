@@ -82,6 +82,47 @@ pub fn load_default() -> Option<(PathBuf, usize)> {
     Some((path, apply(&text)))
 }
 
+/// The env-file path the loader uses (`$KERNELOPT_ENV_FILE` or `./.env`).
+pub fn default_path() -> PathBuf {
+    std::env::var("KERNELOPT_ENV_FILE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".env"))
+}
+
+/// Upsert `KEY=VALUE` pairs into a dotenv file, preserving comments and order.
+/// Existing keys are rewritten in place; new keys are appended. Used by
+/// `kernelopt wizard --save` so later runs pick the choices up.
+pub fn set_vars(path: &std::path::Path, pairs: &[(String, String)]) -> std::io::Result<()> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut lines: Vec<String> = existing.lines().map(|s| s.to_string()).collect();
+    let mut remaining: Vec<(String, String)> = pairs.to_vec();
+    for line in lines.iter_mut() {
+        let trimmed = line.trim();
+        let body = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        let Some((k, _)) = body.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        if let Some(pos) = remaining.iter().position(|(rk, _)| rk == k) {
+            let (rk, rv) = remaining.remove(pos);
+            *line = format!("{rk}={rv}");
+        }
+    }
+    if !remaining.is_empty() {
+        if !lines.is_empty() && !lines.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
+            lines.push(String::new());
+        }
+        for (k, v) in remaining {
+            lines.push(format!("{k}={v}"));
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    std::fs::write(path, out)
+}
+
 /// Expand a leading `~` to `$HOME` (dotenv files often use it for paths).
 pub fn expand_tilde(path: &str) -> String {
     if path == "~" {
@@ -128,5 +169,33 @@ INVALID KEY=value
         assert_eq!(expand_tilde("~/ninfer"), "/home/tester/ninfer");
         assert_eq!(expand_tilde("/abs/path"), "/abs/path");
         assert_eq!(expand_tilde("relative"), "relative");
+    }
+
+    #[test]
+    fn set_vars_upserts_and_preserves_comments() {
+        let path = std::env::temp_dir().join(format!("kopt-env-{}", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            "# my env\nNINFER_REPO=/old/path\nKERNELOPT_MODEL=old-model\n",
+        )
+        .unwrap();
+        set_vars(
+            &path,
+            &[
+                ("NINFER_REPO".into(), "/new/path".into()),
+                ("KERNELOPT_MODEL".into(), "new-model".into()),
+                ("KERNELOPT_E2E_WEIGHTS".into(), "qwen3".into()),
+            ],
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my env"), "{text}");
+        assert!(text.contains("NINFER_REPO=/new/path"), "{text}");
+        assert!(text.contains("KERNELOPT_MODEL=new-model"), "{text}");
+        assert!(text.contains("KERNELOPT_E2E_WEIGHTS=qwen3"), "{text}");
+        // Idempotent: applying an existing key again changes nothing.
+        set_vars(&path, &[("NINFER_REPO".into(), "/new/path".into())]).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let _ = std::fs::remove_file(&path);
     }
 }

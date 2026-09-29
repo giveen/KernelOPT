@@ -447,6 +447,9 @@ enum Cmd {
         /// Print the equivalent command and exit (run nothing).
         #[arg(long)]
         dry_run: bool,
+        /// Persist the choices to `.env` so later plain runs pick them up.
+        #[arg(long)]
+        save: bool,
         #[command(flatten)]
         llm: LlmArgs,
     },
@@ -573,11 +576,16 @@ struct LoopArgs {
 
 fn hyper_from(llm: &LlmArgs, lp: &LoopArgs, default_t: u32) -> Hyper {
     let _ = llm;
+    // CLI -> env (`wizard --save` persists the preset) -> paper default.
+    let env_u32 = |name: &str| env_opt(name).and_then(|v| v.parse::<u32>().ok());
     Hyper {
-        t_iterations: lp.iterations.unwrap_or(default_t),
-        n_plans: lp.plans.unwrap_or(4),
-        k_retries: lp.retries.unwrap_or(4),
-        b_beam: lp.beam.unwrap_or(4),
+        t_iterations: lp
+            .iterations
+            .or_else(|| env_u32("KERNELOPT_ITERATIONS"))
+            .unwrap_or(default_t),
+        n_plans: lp.plans.or_else(|| env_u32("KERNELOPT_PLANS")).unwrap_or(4),
+        k_retries: lp.retries.or_else(|| env_u32("KERNELOPT_RETRIES")).unwrap_or(4),
+        b_beam: lp.beam.or_else(|| env_u32("KERNELOPT_BEAM")).unwrap_or(4),
         ..Default::default()
     }
 }
@@ -1080,8 +1088,8 @@ fn main() -> Result<()> {
 
         Cmd::Models { mode, repo, json } => list_models(mode, repo, json),
 
-        Cmd::Wizard { repo, mode, op, all, e2e_weights, preset, yes, dry_run, llm } => {
-            wizard(repo, mode, op, all, e2e_weights, preset, yes, dry_run, llm)
+        Cmd::Wizard { repo, mode, op, all, e2e_weights, preset, yes, dry_run, save, llm } => {
+            wizard(repo, mode, op, all, e2e_weights, preset, yes, dry_run, save, llm)
         }
     }
 }
@@ -1257,6 +1265,90 @@ fn preset_session_header(provider: &str) -> Option<String> {
     }
 }
 
+/// Outcome of probing an OpenAI-compatible endpoint the way the pipeline uses it.
+struct LlmProbe {
+    base: String,
+    models: Option<usize>,
+    model_listed: bool,
+    completion_ok: Option<bool>,
+    tool_ok: Option<bool>,
+    error: Option<String>,
+}
+
+/// Probe an endpoint: `GET /models` (auth), a 1-token completion, and a forced
+/// tool call (what the pipeline actually depends on).
+fn probe_llm(
+    provider: &str,
+    model: &str,
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<LlmProbe> {
+    let preset = config::provider_preset(provider);
+    let base = base_url
+        .map(|s| s.to_string())
+        .or_else(|| preset.as_ref().map(|p| p.base_url.clone()))
+        .with_context(|| format!("no base URL for provider {provider:?}"))?;
+    let key = api_key.map(|s| s.to_string()).or_else(|| {
+        preset
+            .as_ref()
+            .and_then(|p| p.api_key_env.clone())
+            .and_then(|env| std::env::var(env).ok())
+    });
+    if preset.as_ref().map(|p| p.needs_key).unwrap_or(false) && key.is_none() {
+        anyhow::bail!(
+            "provider {provider:?} needs an API key: set {} or pass --api-key",
+            preset.as_ref().and_then(|p| p.api_key_env.clone()).unwrap_or_default()
+        );
+    }
+    let client = llm::OpenAiCompatClient::new(
+        base.clone(),
+        model.to_string(),
+        key,
+        format!("kernelopt/{}", env!("CARGO_PKG_VERSION")),
+        preset_session_header(provider),
+        Duration::from_secs(120),
+    );
+    let mut p = LlmProbe {
+        base,
+        models: None,
+        model_listed: false,
+        completion_ok: None,
+        tool_ok: None,
+        error: None,
+    };
+    match client.list_models() {
+        Ok(models) => {
+            p.models = Some(models.len());
+            p.model_listed = models.iter().any(|m| m == model);
+        }
+        Err(e) => {
+            p.error = Some(format!("{e:#}"));
+            return Ok(p);
+        }
+    }
+    p.completion_ok = Some(client.ping().is_ok());
+    let tools = vec![llm::ToolDef {
+        name: "probe".into(),
+        description: "Echo a value back to the caller".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"]
+        }),
+    }];
+    p.tool_ok = Some(matches!(
+        client.complete(
+            "You are a connectivity probe.",
+            "Call the probe tool with value \"ok\".",
+            &tools,
+            "kernelopt-providers-test",
+            Some("probe"),
+        ),
+        Ok(c) if c.tool_calls.iter().any(|t| t.name == "probe")
+    ));
+    Ok(p)
+}
+
 fn providers(
     provider: Option<String>,
     model: Option<String>,
@@ -1279,83 +1371,36 @@ fn providers(
     println!("{:<14} scripted completions, zero tokens (for tests)", "mock");
     println!();
 
-    let preset = config::provider_preset(&provider);
-    let base = base_url
-        .or_else(|| preset.as_ref().map(|p| p.base_url.clone()))
-        .with_context(|| format!("no base URL for provider {provider:?}"))?;
-    let key = api_key.or_else(|| {
-        preset
-            .as_ref()
-            .and_then(|p| p.api_key_env.clone())
-            .and_then(|env| std::env::var(env).ok())
-    });
-    if preset.as_ref().map(|p| p.needs_key).unwrap_or(false) && key.is_none() {
-        anyhow::bail!(
-            "provider {provider:?} needs an API key: set {} or pass --api-key",
-            preset.as_ref().and_then(|p| p.api_key_env.clone()).unwrap_or_default()
-        );
-    }
-    let client = llm::OpenAiCompatClient::new(
-        base.clone(),
-        model.clone(),
-        key,
-        format!("kernelopt/{}", env!("CARGO_PKG_VERSION")),
-        preset_session_header(&provider),
-        Duration::from_secs(120),
-    );
-    println!("testing {provider} @ {base} (model: {model})");
-    match client.list_models() {
-        Ok(models) => {
-            println!("  auth OK — {} models visible", models.len());
-            if !models.iter().any(|m| m == &model) {
-                println!("  WARNING: {model:?} not in model list; sample: {:?}", &models[..models.len().min(6)]);
-            } else {
+    let p = probe_llm(&provider, &model, base_url.as_deref(), api_key.as_deref())?;
+    println!("testing {provider} @ {} (model: {model})", p.base);
+    match (&p.models, &p.error) {
+        (Some(n), _) => {
+            println!("  auth OK — {n} models visible");
+            if p.model_listed {
                 println!("  model {model:?} available");
+            } else {
+                println!("  WARNING: {model:?} not in model list");
             }
         }
-        Err(e) => {
-            println!("  models check failed: {e:#}");
+        (None, Some(e)) => {
+            println!("  models check failed: {e}");
             return Ok(());
         }
+        (None, None) => {}
     }
     if !no_ping {
-        print!("  completion probe… ");
-        std::io::Write::flush(&mut std::io::stdout())?;
-        match client.ping() {
-            Ok(reply) => println!("OK — reply: {}", reply.trim().chars().take(40).collect::<String>()),
-            Err(e) => println!("FAILED: {e:#}"),
+        match p.completion_ok {
+            Some(true) => println!("  completion probe… OK"),
+            Some(false) => println!("  completion probe… FAILED"),
+            None => {}
         }
-        // The pipeline depends on forced tool calls — probe one explicitly, the
-        // same way the Planner/Executor call the model.
-        print!("  tool-call probe… ");
-        std::io::Write::flush(&mut std::io::stdout())?;
-        let tools = vec![llm::ToolDef {
-            name: "probe".into(),
-            description: "Echo a value back to the caller".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {"value": {"type": "string"}},
-                "required": ["value"]
-            }),
-        }];
-        match client.complete(
-            "You are a connectivity probe.",
-            "Call the probe tool with value \"ok\".",
-            &tools,
-            "kernelopt-providers-test",
-            Some("probe"),
-        ) {
-            Ok(c) => match c.tool_calls.iter().find(|t| t.name == "probe") {
-                Some(tc) => println!(
-                    "OK — probe(value={:?})",
-                    tc.arguments.get("value").and_then(|v| v.as_str()).unwrap_or("?")
-                ),
-                None => println!(
-                    "NO TOOL CALL — content only; forced tool calls may be unsupported here \
-                     (the client falls back to \"auto\"/no tool_choice)"
-                ),
-            },
-            Err(e) => println!("FAILED: {e:#}"),
+        match p.tool_ok {
+            Some(true) => println!("  tool-call probe… OK"),
+            Some(false) => println!(
+                "  tool-call probe… NO TOOL CALL — content only; forced tool calls may be \
+                 unsupported here (the client falls back to \"auto\"/no tool_choice)"
+            ),
+            None => {}
         }
     }
     Ok(())
@@ -1372,6 +1417,7 @@ fn wizard(
     preset: Option<String>,
     yes: bool,
     dry_run: bool,
+    save: bool,
     llm: LlmArgs,
 ) -> Result<()> {
     // 1. Target checkout: flag -> env -> prompt.
@@ -1437,6 +1483,31 @@ fn wizard(
     };
     let (iterations, beam) = kernelopt::wizard::preset(&preset);
     println!("· preset: {preset} ({iterations} iterations, beam {beam})");
+
+    // Optionally persist the choices so later plain runs pick them up.
+    if save {
+        let repo_key = match backend {
+            Backend::Ninfer => "NINFER_REPO",
+            Backend::Llamacpp => "LLAMACPP_REPO",
+        };
+        let mut pairs: Vec<(String, String)> = vec![
+            (repo_key.into(), repo.to_string_lossy().to_string()),
+            ("KERNELOPT_PROVIDER".into(), provider.clone()),
+            ("KERNELOPT_MODEL".into(), model.clone()),
+            ("KERNELOPT_ITERATIONS".into(), iterations.to_string()),
+            ("KERNELOPT_BEAM".into(), beam.to_string()),
+        ];
+        if let Some(e) = &e2e {
+            pairs.push(("KERNELOPT_E2E_WEIGHTS".into(), e.clone()));
+        }
+        let path = kernelopt::dotenv::default_path();
+        kernelopt::dotenv::set_vars(&path, &pairs)?;
+        println!(
+            "· saved to {} ({})",
+            path.display(),
+            pairs.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
 
     let plan = kernelopt::wizard::Plan {
         backend,
@@ -1539,20 +1610,44 @@ fn choose_preset() -> Result<String> {
     Ok(kernelopt::wizard::PRESETS[k - 1].0.to_string())
 }
 
-fn prompt_llm(resolved: ResolvedLlm) -> Result<(String, String)> {
-    println!(
-        "\nOptimizer LLM (from .env): {}/{}  — verify with `kernelopt providers`",
-        resolved.provider, resolved.model
-    );
-    if confirm("Use it?", true)? {
-        return Ok((resolved.provider, resolved.model));
+/// Ask for the optimizer LLM, probing it first (auth + tool call) so a broken
+/// model is caught before a run starts.
+fn prompt_llm(mut resolved: ResolvedLlm) -> Result<(String, String)> {
+    loop {
+        println!(
+            "\nOptimizer LLM: {}/{}",
+            resolved.provider, resolved.model
+        );
+        match probe_llm(
+            &resolved.provider,
+            &resolved.model,
+            resolved.base_url.as_deref(),
+            resolved.api_key.as_deref(),
+        ) {
+            Ok(p) => match (p.models, p.tool_ok) {
+                (Some(n), Some(true)) => println!("  probe: OK — {n} models, tool call works"),
+                (Some(n), Some(false)) => println!(
+                    "  probe: WARNING — {n} models, but no tool call; the pipeline needs tool calls"
+                ),
+                (_, _) => println!(
+                    "  probe: {}",
+                    p.error.unwrap_or_else(|| "inconclusive".into())
+                ),
+            },
+            Err(e) => println!("  probe failed: {e:#}"),
+        }
+        if confirm("Use it?", true)? {
+            return Ok((resolved.provider, resolved.model));
+        }
+        let provider = ask_line(&format!("provider [{}]: ", resolved.provider))?;
+        let model = ask_line(&format!("model [{}]: ", resolved.model))?;
+        if !provider.is_empty() {
+            resolved.provider = provider;
+        }
+        if !model.is_empty() {
+            resolved.model = model;
+        }
     }
-    let provider = ask_line(&format!("provider [{}]: ", resolved.provider))?;
-    let model = ask_line(&format!("model [{}]: ", resolved.model))?;
-    Ok((
-        if provider.is_empty() { resolved.provider } else { provider },
-        if model.is_empty() { resolved.model } else { model },
-    ))
 }
 
 /// List local model artifacts usable for the engine-E2E (Gate 3) check.

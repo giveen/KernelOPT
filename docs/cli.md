@@ -158,7 +158,14 @@ models`), and a loop preset; then prints and runs the equivalent command.
 
 - `--yes` — accept detected defaults, no prompts (all targets, `standard` preset).
 - `--dry-run` — print the command and exit without running it.
-- Presets set `--iterations`/`--beam`: `quick` 2/1, `standard` 3/2, `thorough` 5/3.
+- `--save` — upsert the choices into `.env` (`NINFER_REPO`/`LLAMACPP_REPO`,
+  `KERNELOPT_PROVIDER`, `KERNELOPT_MODEL`, `KERNELOPT_ITERATIONS`,
+  `KERNELOPT_BEAM`, and `KERNELOPT_E2E_WEIGHTS`), so later plain commands pick
+  them up. Existing keys are rewritten in place; comments are preserved.
+- The optimizer LLM is **probed** (auth + a forced tool call) before you accept
+  it, so a broken model is caught before a run starts.
+- Presets set `--iterations`/`--beam`: `quick` 2/1, `standard` 3/2, `thorough` 5/3
+  (persisted as `KERNELOPT_ITERATIONS`/`KERNELOPT_BEAM`).
 
 ### `setup-graphsignal` — provision the profiler
 

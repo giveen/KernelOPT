@@ -86,12 +86,14 @@ are optional. If you pass `--repo "$NINFER_REPO"`, export it first
 ```bash
 kernelopt wizard            # detects repo/backend/targets, asks a few questions, runs
 kernelopt wizard --dry-run  # just show the command it would run
+kernelopt wizard --save     # also persist the choices to .env for later runs
 kernelopt wizard --yes      # accept detected defaults, no prompts (scripts/CI)
 ```
 
-It reads your `.env`, lists the discovered kernels and local models, offers
-`quick | standard | thorough` presets, then prints and runs the exact command —
-so you can graduate to the flags once you know what you want.
+It reads your `.env`, probes the optimizer LLM (auth + a forced tool call), lists
+the discovered kernels and local models, offers `quick | standard | thorough`
+presets, then prints and runs the exact command — so you can graduate to the
+flags once you know what you want.
 
 ### One kernel
 
