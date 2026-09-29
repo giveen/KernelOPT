@@ -36,14 +36,32 @@ Any OpenAI-compatible endpoint. Presets:
 | `mock` | scripted, zero tokens (tests) | — |
 
 ```bash
-kernelopt providers --provider opencode-go --model <model>   # auth + model probe
+kernelopt providers --provider opencode-go --model <model>   # auth + model + tool-call probe
 ```
+
+The probe checks three things: `GET /models` (auth + model id), a 1-token
+completion, and a **forced tool call** — the pipeline drives the model entirely
+through tool calls, so this is the compatibility check that matters.
+
+The client is defensive about OpenAI-compatible servers that diverge, and falls
+back automatically (logging once to stderr):
+
+- rejects `reasoning_effort` → retried without it;
+- rejects a forced `tool_choice` (named) → retried with `"auto"`, then with no
+  `tool_choice`;
+- rejects tool schemas entirely → retried without tools;
+- returns `tool_calls: null`, object-valued `arguments`, or array `content` →
+  all accepted.
+
+Local servers (`ollama`/`vllm`/`lmstudio`) default `reasoning_effort` **off**
+(they don't accept it); set `--reasoning-effort` explicitly to force it.
 
 ## Thinking level
 
 `--reasoning-effort` (alias `--thinking`) controls how much the model thinks
 before answering; it is sent as OpenAI `reasoning_effort`. Defaults to **`low`**
-(faster, cheaper), accepts `none|minimal|low|medium|high`, and is validated.
+for hosted providers (faster, cheaper) and **off** for local ones, accepts
+`none|minimal|low|medium|high`, and is validated.
 
 ```bash
 kernelopt run-ninfer --op add_bias --repo "$NINFER_REPO" --thinking high

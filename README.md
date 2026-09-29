@@ -230,6 +230,12 @@ Tests needing a repo/build skip when the env vars are unset.
   lock (`.kernelopt/gpu.lock`). Bench/verify/NCU/E2E serialize on it so the device
   only runs one job; wait for the other run, or remove a stale lockfile if no
   process is using it.
+- **The model never calls the tools (`no_tool_call` retries)** — the pipeline
+  drives the model entirely through tool calls. Verify your provider/model with
+  `kernelopt providers --provider <p> --model <m>`; its **tool-call probe** shows
+  whether forced tool calls work. The client auto-falls-back to `tool_choice:
+  "auto"` then no `tool_choice`, but a model that cannot emit tool calls at all
+  cannot drive the pipeline.
 
 ## Repository layout
 

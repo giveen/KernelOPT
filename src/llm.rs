@@ -122,6 +122,7 @@ struct ChatChoice {
 
 #[derive(Deserialize)]
 struct ResponseMessage {
+    #[serde(default, deserialize_with = "content_as_text")]
     content: Option<String>,
     #[serde(default, deserialize_with = "null_as_default")]
     tool_calls: Vec<WireToolCallOut>,
@@ -137,6 +138,27 @@ where
     Ok(v.unwrap_or_default())
 }
 
+/// `content` is a string per the OpenAI spec, but some servers send an array of
+/// content parts (`[{"type":"text","text":"…"}]`) — accept both.
+fn content_as_text<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match v {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s),
+        Some(serde_json::Value::Array(parts)) => Some(
+            parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join(""),
+        ),
+        Some(other) => Some(other.to_string()),
+    })
+}
+
 #[derive(Deserialize)]
 struct WireToolCallOut {
     function: WireToolFnOut,
@@ -145,7 +167,24 @@ struct WireToolCallOut {
 #[derive(Deserialize)]
 struct WireToolFnOut {
     name: String,
-    arguments: String,
+    /// `arguments` is a JSON *string* per the OpenAI spec, but some compatible
+    /// servers send the object directly — accept both.
+    #[serde(default, deserialize_with = "string_or_json")]
+    arguments: serde_json::Value,
+}
+
+/// Accept `arguments` as either a JSON string (parse it) or an object (use it).
+fn string_or_json<'de, D>(deserializer: D) -> Result<serde_json::Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(deserializer)?;
+    Ok(match v {
+        serde_json::Value::String(s) => {
+            serde_json::from_str(&s).unwrap_or(serde_json::Value::Null)
+        }
+        other => other,
+    })
 }
 
 #[derive(Deserialize)]
@@ -199,19 +238,6 @@ impl OpenAiCompatClient {
         self
     }
 
-    fn clone_for_retry(&self) -> OpenAiCompatClient {
-        OpenAiCompatClient {
-            base_url: self.base_url.clone(),
-            model: self.model.clone(),
-            api_key: self.api_key.clone(),
-            user_agent: self.user_agent.clone(),
-            session_header: self.session_header.clone(),
-            timeout: self.timeout,
-            reasoning_effort: None,
-            http: self.http.clone(),
-        }
-    }
-
     fn authed(&self, url: &str) -> reqwest::blocking::RequestBuilder {
         let mut req = self.http.get(url);
         if let Some(key) = &self.api_key {
@@ -259,6 +285,14 @@ impl OpenAiCompatClient {
     }
 }
 
+/// How `tool_choice` is sent while self-healing provider divergences.
+#[derive(Clone, Copy, PartialEq)]
+enum Choice<'a> {
+    Given(Option<&'a str>),
+    Auto,
+    Omit,
+}
+
 impl LlmClient for OpenAiCompatClient {
     fn complete(
         &self,
@@ -267,6 +301,32 @@ impl LlmClient for OpenAiCompatClient {
         tools: &[ToolDef],
         session_id: &str,
         tool_choice: Option<&str>,
+    ) -> Result<Completion> {
+        self.complete_with(
+            system,
+            user,
+            tools,
+            session_id,
+            Choice::Given(tool_choice),
+            false,
+            false,
+        )
+    }
+}
+
+impl OpenAiCompatClient {
+    /// `complete` plus progressive fallbacks for OpenAI-compatible servers that
+    /// diverge on `reasoning_effort`, `tool_choice`, or tool schemas. Each
+    /// fallback is logged once and never loops (the drop flags are sticky).
+    fn complete_with(
+        &self,
+        system: &str,
+        user: &str,
+        tools: &[ToolDef],
+        session_id: &str,
+        choice: Choice<'_>,
+        drop_reasoning: bool,
+        drop_tools: bool,
     ) -> Result<Completion> {
         let url = format!("{}/chat/completions", self.base_url);
         let mut messages = vec![ChatMessage {
@@ -282,7 +342,7 @@ impl LlmClient for OpenAiCompatClient {
             tool_call_id: None,
         });
 
-        let wire_tools = if tools.is_empty() {
+        let wire_tools = if drop_tools || tools.is_empty() {
             None
         } else {
             Some(
@@ -302,7 +362,12 @@ impl LlmClient for OpenAiCompatClient {
 
         // tool_choice: "auto"/"required" verbatim; any other string names a
         // function to force (OpenAI named-object form).
-        let wire_tool_choice = tool_choice.map(|tc| {
+        let choice_str = match choice {
+            Choice::Given(c) => c,
+            Choice::Auto => Some("auto"),
+            Choice::Omit => None,
+        };
+        let wire_tool_choice = choice_str.map(|tc| {
             if tc == "auto" || tc == "required" || tc == "none" {
                 serde_json::json!(tc)
             } else {
@@ -314,7 +379,11 @@ impl LlmClient for OpenAiCompatClient {
             messages,
             tools: wire_tools,
             tool_choice: wire_tool_choice,
-            reasoning_effort: self.reasoning_effort.clone(),
+            reasoning_effort: if drop_reasoning {
+                None
+            } else {
+                self.reasoning_effort.clone()
+            },
         };
 
         let mut req = self
@@ -335,35 +404,65 @@ impl LlmClient for OpenAiCompatClient {
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
         if !status.is_success() {
-            // Self-healing: some models/endpoints reject reasoning_effort —
-            // retry once without it when the error names the parameter.
-            if self.reasoning_effort.is_some()
-                && status.as_u16() == 400
-                && text.contains("reasoning_effort")
+            let code = status.as_u16();
+            let lower = text.to_ascii_lowercase();
+            let retryable = code == 400 || code == 422;
+            // Some models/endpoints reject reasoning_effort.
+            if retryable
+                && !drop_reasoning
+                && self.reasoning_effort.is_some()
+                && lower.contains("reasoning")
             {
-                let retry = OpenAiCompatClient {
-                    reasoning_effort: None,
-                    ..self.clone_for_retry()
+                eprintln!("[llm] {status}: endpoint rejected reasoning_effort; retrying without it");
+                return self.complete_with(system, user, tools, session_id, choice, true, drop_tools);
+            }
+            // Some servers reject a *forced* tool_choice (named or "auto").
+            if retryable
+                && !drop_tools
+                && !tools.is_empty()
+                && choice != Choice::Omit
+                && lower.contains("tool_choice")
+            {
+                let next = if matches!(choice, Choice::Given(Some(_))) {
+                    Choice::Auto
+                } else {
+                    Choice::Omit
                 };
-                eprintln!("[llm] reasoning_effort rejected by endpoint; retrying without it");
-                return retry.complete(system, user, tools, session_id, tool_choice);
+                eprintln!(
+                    "[llm] {status}: endpoint rejected tool_choice; retrying with {}",
+                    if next == Choice::Auto { "\"auto\"" } else { "no tool_choice" }
+                );
+                return self.complete_with(system, user, tools, session_id, next, drop_reasoning, drop_tools);
+            }
+            // Some servers do not support tool schemas at all.
+            if retryable
+                && !drop_tools
+                && !tools.is_empty()
+                && (lower.contains("tool") || lower.contains("function"))
+                && (lower.contains("support")
+                    || lower.contains("unrecognized")
+                    || lower.contains("unknown")
+                    || lower.contains("invalid")
+                    || lower.contains("not allowed")
+                    || lower.contains("extra"))
+            {
+                eprintln!("[llm] {status}: endpoint rejected tool schemas; retrying without tools");
+                return self.complete_with(system, user, tools, session_id, Choice::Omit, drop_reasoning, true);
             }
             anyhow::bail!("LLM API error {status}: {}", truncate(&text, 2000));
         }
         let parsed: ChatResponse =
             serde_json::from_str(&text).with_context(|| format!("parsing response: {}", truncate(&text, 500)))?;
 
-        let choice = parsed.choices.first().context("empty choices")?;
+        let msg = &parsed.choices.first().context("empty choices")?.message;
         Ok(Completion {
-            content: choice.message.content.clone(),
-            tool_calls: choice
-                .message
+            content: msg.content.clone(),
+            tool_calls: msg
                 .tool_calls
                 .iter()
                 .map(|tc| ToolCall {
                     name: tc.function.name.clone(),
-                    arguments: serde_json::from_str(&tc.function.arguments)
-                        .unwrap_or(serde_json::Value::Null),
+                    arguments: tc.function.arguments.clone(),
                 })
                 .collect(),
             usage: parsed.usage.map(|u| Usage {
@@ -484,5 +583,148 @@ mod tests {
         // queue exhausted -> default
         let c2 = client.complete("s", "u", &tools, "sess", None).unwrap();
         assert!(c2.tool_calls.is_empty());
+    }
+
+    // ---- provider-compat parsing (the shapes real servers actually send) ---- //
+
+    #[test]
+    fn parses_object_tool_arguments_and_array_content() {
+        // Some OpenAI-compatible servers send `arguments` as an object and
+        // `content` as an array of parts.
+        let body = r#"{
+          "choices": [{"message": {
+            "content": [{"type":"text","text":"hello "},{"type":"text","text":"world"}],
+            "tool_calls": [{"type":"function","function":{"name":"submit_plan","arguments":{"plan":{"change":"x"}}}}]
+          }}],
+          "usage": {"prompt_tokens": 3, "completion_tokens": 4}
+        }"#;
+        let parsed: ChatResponse = serde_json::from_str(body).unwrap();
+        let msg = &parsed.choices[0].message;
+        assert_eq!(msg.content.as_deref(), Some("hello world"));
+        assert_eq!(msg.tool_calls[0].function.arguments["plan"]["change"], "x");
+        assert_eq!(parsed.usage.as_ref().unwrap().completion_tokens, 4);
+    }
+
+    #[test]
+    fn parses_string_tool_arguments() {
+        let body = r#"{"choices":[{"message":{"content":"ok","tool_calls":[
+          {"function":{"name":"submit_kernel","arguments":"{\"kernel_source\":\"int main(){}\"}"}}]}}]}"#;
+        let parsed: ChatResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            parsed.choices[0].message.tool_calls[0].function.arguments["kernel_source"],
+            "int main(){}"
+        );
+    }
+
+    #[test]
+    fn tolerates_null_tool_calls() {
+        let body = r#"{"choices":[{"message":{"content":"hi","tool_calls":null}}]}"#;
+        let parsed: ChatResponse = serde_json::from_str(body).unwrap();
+        assert!(parsed.choices[0].message.tool_calls.is_empty());
+        assert_eq!(parsed.choices[0].message.content.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn tolerates_null_content_and_missing_usage() {
+        let body = r#"{"choices":[{"message":{"content":null,"tool_calls":[]}}]}"#;
+        let parsed: ChatResponse = serde_json::from_str(body).unwrap();
+        assert!(parsed.choices[0].message.content.is_none());
+        assert!(parsed.usage.is_none());
+    }
+
+    // ---- self-healing against an OpenAI-compatible server that diverges ---- //
+
+    fn read_request_body(sock: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+        let mut data = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = sock.read(&mut buf).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            data.extend_from_slice(&buf[..n]);
+            if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&data[..pos]).to_lowercase();
+                let clen = headers
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if data.len() >= pos + 4 + clen {
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&data)
+            .split("\r\n\r\n")
+            .nth(1)
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn mock_server(
+        replies: Vec<(u16, &'static str)>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for (code, payload) in replies {
+                let (mut sock, _) = listener.accept().unwrap();
+                bodies.push(read_request_body(&mut sock));
+                let reason = if code == 200 { "OK" } else { "Bad Request" };
+                let resp = format!(
+                    "HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            }
+            bodies
+        });
+        (format!("http://{addr}/v1"), handle)
+    }
+
+    fn test_client(base: String) -> OpenAiCompatClient {
+        OpenAiCompatClient::new(base, "m".into(), None, "ua".into(), None, Duration::from_secs(5))
+    }
+
+    #[test]
+    fn self_heals_reasoning_effort_rejection() {
+        let ok = r#"{"choices":[{"message":{"content":"ok","tool_calls":[]}}]}"#;
+        let (base, server) = mock_server(vec![
+            (400, r#"{"error":{"message":"Unrecognized request argument supplied: reasoning_effort"}}"#),
+            (200, ok),
+        ]);
+        let client = test_client(base).with_reasoning_effort(Some("low".into()));
+        let out = client.complete("s", "u", &[], "sess", None).unwrap();
+        assert_eq!(out.content.as_deref(), Some("ok"));
+        let bodies = server.join().unwrap();
+        assert!(bodies[0].contains("reasoning_effort"), "first body: {}", bodies[0]);
+        assert!(!bodies[1].contains("reasoning_effort"), "retry body: {}", bodies[1]);
+    }
+
+    #[test]
+    fn self_heals_tool_choice_rejection() {
+        let ok = r#"{"choices":[{"message":{"content":"ok","tool_calls":[]}}]}"#;
+        let (base, server) = mock_server(vec![
+            (400, r#"{"error":{"message":"tool_choice is not supported"}}"#),
+            (200, ok),
+        ]);
+        let client = test_client(base);
+        let tools = vec![ToolDef {
+            name: "submit_plan".into(),
+            description: "d".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let out = client
+            .complete("s", "u", &tools, "sess", Some("submit_plan"))
+            .unwrap();
+        assert_eq!(out.content.as_deref(), Some("ok"));
+        let bodies = server.join().unwrap();
+        assert!(bodies[0].contains("\"name\":\"submit_plan\""), "first body: {}", bodies[0]);
+        assert!(bodies[1].contains("\"tool_choice\":\"auto\""), "retry body: {}", bodies[1]);
     }
 }

@@ -1252,6 +1252,38 @@ fn providers(
             Ok(reply) => println!("OK — reply: {}", reply.trim().chars().take(40).collect::<String>()),
             Err(e) => println!("FAILED: {e:#}"),
         }
+        // The pipeline depends on forced tool calls — probe one explicitly, the
+        // same way the Planner/Executor call the model.
+        print!("  tool-call probe… ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let tools = vec![llm::ToolDef {
+            name: "probe".into(),
+            description: "Echo a value back to the caller".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"]
+            }),
+        }];
+        match client.complete(
+            "You are a connectivity probe.",
+            "Call the probe tool with value \"ok\".",
+            &tools,
+            "kernelopt-providers-test",
+            Some("probe"),
+        ) {
+            Ok(c) => match c.tool_calls.iter().find(|t| t.name == "probe") {
+                Some(tc) => println!(
+                    "OK — probe(value={:?})",
+                    tc.arguments.get("value").and_then(|v| v.as_str()).unwrap_or("?")
+                ),
+                None => println!(
+                    "NO TOOL CALL — content only; forced tool calls may be unsupported here \
+                     (the client falls back to \"auto\"/no tool_choice)"
+                ),
+            },
+            Err(e) => println!("FAILED: {e:#}"),
+        }
     }
     Ok(())
 }

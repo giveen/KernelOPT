@@ -229,7 +229,8 @@ impl Config {
             );
         }
 
-        let reasoning_effort = resolve_reasoning_effort(reasoning_effort, file.reasoning_effort)?;
+        let reasoning_effort =
+            resolve_reasoning_effort_for(&provider, reasoning_effort, file.reasoning_effort)?;
 
         let root = PathBuf::from(".");
         Ok(Config {
@@ -276,6 +277,20 @@ pub fn resolve_reasoning_effort(
     }
 }
 
+/// Resolve `reasoning_effort` with a provider-aware default: local servers
+/// (ollama/vllm/lmstudio) do not accept the parameter, so default it off there.
+/// An explicit CLI/`config.toml` value still wins.
+pub fn resolve_reasoning_effort_for(
+    provider: &str,
+    cli: Option<String>,
+    file: Option<String>,
+) -> Result<Option<String>> {
+    if cli.is_none() && file.is_none() && matches!(provider, "ollama" | "vllm" | "lmstudio") {
+        return Ok(None);
+    }
+    resolve_reasoning_effort(cli, file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +318,23 @@ mod tests {
             Some("medium".into())
         );
         assert!(resolve_reasoning_effort(Some("bogus".into()), None).is_err());
+    }
+
+    #[test]
+    fn local_providers_default_reasoning_off() {
+        // Local servers don't accept reasoning_effort -> default off.
+        assert_eq!(resolve_reasoning_effort_for("ollama", None, None).unwrap(), None);
+        assert_eq!(resolve_reasoning_effort_for("vllm", None, None).unwrap(), None);
+        assert_eq!(resolve_reasoning_effort_for("lmstudio", None, None).unwrap(), None);
+        // Hosted providers keep the "low" default.
+        assert_eq!(
+            resolve_reasoning_effort_for("openai", None, None).unwrap(),
+            Some("low".into())
+        );
+        // An explicit CLI value still wins on a local provider.
+        assert_eq!(
+            resolve_reasoning_effort_for("ollama", Some("high".into()), None).unwrap(),
+            Some("high".into())
+        );
     }
 }
