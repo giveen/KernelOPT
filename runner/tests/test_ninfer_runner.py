@@ -131,6 +131,18 @@ def test_merge_bench_runs_uses_slowest_shape_and_noise():
     assert m["noise_pct"] is not None and m["noise_pct"] >= 0.0
 
 
+def test_merge_bench_runs_shape_filter():
+    runs = [
+        {"rows": [{"median_us": 10.0, "label": "add_bias [1152,8]"}, {"median_us": 100.0, "label": "add_bias [1152,4096]"}]}
+    ]
+    m = ninfer._merge_bench_runs(runs, shape_filter="1152,8")
+    assert m["representative_label"] == "add_bias [1152,8]"
+    assert m["representative_us"] == 10.0
+    # No match -> fall back to the slowest shape.
+    m2 = ninfer._merge_bench_runs(runs, shape_filter="does-not-exist")
+    assert m2["representative_us"] == 100.0
+
+
 def test_parse_numstat():
     text = "3\t1\tsrc/ops/linear_add/fp8/fp8_linear_add_a8.cu\n-\t-\tbin/thing\n"
     s = ninfer.parse_numstat(text)

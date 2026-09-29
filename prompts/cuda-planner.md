@@ -71,8 +71,6 @@ WHEN YOU SUBMIT, the plan must:
 - Give the Executor enough detail in `change` and `implementation_hints` that
   it does not need to re-read profiling data.
 
-{{diversity_hint}}
-Directions already tried this run (avoid repeats): {{recent_directions}}
-Known-bad directions: {{avoid_flags}}
-
-{{memory_context}}
+The user message that follows contains (in order) the target, the contract header,
+the kernel source or outline, the profiling context, and then the run's memory and
+recent directions. Keep the request prefix stable: do not restate it.

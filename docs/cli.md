@@ -201,6 +201,8 @@ Optimize one ninfer Op in an isolated worktree.
 | `--quiet` | off | Suppress live per-iteration progress (stderr). |
 | `--watch` | off | Tail the run's journal live in this terminal (single-terminal view). |
 | `--edit-mode <MODE>` | `full` | `full` = Executor returns the whole file; `patch` = returns a unified diff applied with `git apply` (no reproduction drift). See [kernel-editing.md](kernel-editing.md). |
+| `--bench-shape <SUBSTR>` | slowest | Pin the representative bench shape (substring of the bench row label). |
+| `--final-rounds <N>` | `2` | Interleaved fresh baseline/candidate re-bench rounds at finalize (sign test). |
 
 Plus the shared LLM and loop options.
 
@@ -222,6 +224,8 @@ Optimize one llama.cpp `ggml-cuda` kernel in an isolated worktree.
 | `--quiet` | off | Suppress live per-iteration progress (stderr). |
 | `--watch` | off | Tail the run's journal live in this terminal (single-terminal view). |
 | `--edit-mode <MODE>` | `full` | `full` = Executor returns the whole file; `patch` = returns a unified diff applied with `git apply` (no reproduction drift). See [kernel-editing.md](kernel-editing.md). |
+| `--bench-shape <SUBSTR>` | slowest | Pin the representative bench shape (substring of the bench row label). |
+| `--final-rounds <N>` | `2` | Interleaved fresh baseline/candidate re-bench rounds at finalize (sign test). |
 
 Plus the shared LLM and loop options.
 
@@ -254,6 +258,8 @@ See "What each campaign option does" above.
 | `--quiet` | off | Suppress live per-iteration progress (stderr). |
 | `--watch` | off | Tail the run's journal live in this terminal (single-terminal view). |
 | `--edit-mode <MODE>` | `full` | `full` = Executor returns the whole file; `patch` = returns a unified diff applied with `git apply` (no reproduction drift). See [kernel-editing.md](kernel-editing.md). |
+| `--bench-shape <SUBSTR>` | slowest | Pin the representative bench shape (substring of the bench row label). |
+| `--final-rounds <N>` | `2` | Interleaved fresh baseline/candidate re-bench rounds at finalize (sign test). |
 
 Plus the shared LLM and loop options.
 
@@ -307,6 +313,7 @@ Provision Graphsignal into KernelOPT's managed venv (no separate install).
 | `history <RUN_ID>` | — | List a run's candidate commits (sha, status, latency, plan). |
 | `revert <RUN_ID>` | `--to <sha\|tag>` | Reset the run's worktree to a candidate commit. |
 | `analyze <RUN_ID>` | `--json` | Diagnose a run: failure taxonomy (compile/correctness/bench/no-tool-call), retries, token spend by agent, plan diversity, and the winner summary. |
+| `eval <CAMPAIGN_ID>` | — | Aggregate a campaign into a **self-benchmark**: win rate, speedup distribution (median/max), failure taxonomy, and token cost. |
 | `report <RUN_ID>` | — | Render the run's markdown report from the journal, ending with the **winner: what changed / why it's faster** (executor summary, planner evidence, measured speedup). |
 | `resume <RUN_ID>` | — | Report the last recorded state of an interrupted run. |
 

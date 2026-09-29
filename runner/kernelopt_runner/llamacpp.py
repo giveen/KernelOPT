@@ -159,7 +159,7 @@ def llama_bench(request: dict) -> dict:
             "noise_pct": None,
             "row_count": 0,
         }
-    merged = _merge_bench_runs(runs)
+    merged = _merge_bench_runs(runs, request.get("shape_filter"))
     return {
         "ok": True,
         "passed": proc.returncode == 0 and merged["representative_us"] is not None,

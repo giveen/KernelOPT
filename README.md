@@ -36,6 +36,13 @@ is committed and tagged for fast revert. The Executor edits by whole file
 drift; either way the run outputs a reviewable unified diff and your checkout is
 never modified.
 
+**Measurement rigor:** an op-level speedup is measured on a pinned shape with 3
+repeats, then re-confirmed with interleaved fresh baseline/candidate re-benches
+(`--final-rounds`). A candidate is only called `optimized` if it beats the baseline
+by more than the measured noise *and* wins every round — otherwise it is `matched`.
+The reported number is always explicit (`N×` = baseline/final, with the shape and
+ms values).
+
 ## Requirements
 
 - **Rust** (stable, edition 2021) + Cargo.
@@ -178,6 +185,28 @@ docs/                      this directory
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
+
+## Citation
+
+This project implements the method and adapts the agent prompts from
+**KernelOPT: Dispatch-Aware Agentic Search for GPU Kernel Optimization**
+(Poddar, Prasad, Samanta, Chakraborty, Goyal, Rathaur; arXiv:2609.30059).
+
+```bibtex
+@misc{poddar2026kernelopt,
+  title        = {KernelOPT: Dispatch-Aware Agentic Search for GPU Kernel Optimization},
+  author       = {Poddar, Aheli and Prasad, Sanskar and Samanta, Arindam and
+                  Chakraborty, Subha and Goyal, Vishal and Rathaur, Rohit Singh},
+  year         = {2026},
+  eprint       = {2609.30059},
+  archivePrefix= {arXiv},
+  primaryClass = {cs.DC},
+  url          = {https://arxiv.org/abs/2609.30059}
+}
+```
+
+See [`CITATION.cff`](CITATION.cff) and [`NOTICE`](NOTICE). The Planner, Executor,
+and Summarizer prompts under `prompts/` are adapted from the paper's appendix.
 
 ## References
 

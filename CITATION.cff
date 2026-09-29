@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper it implements."
+title: KernelOPT
+abstract: >-
+  Dispatch-aware, agentic GPU-kernel optimization for compiled PyTorch models,
+  ninfer CUDA ops, and llama.cpp ggml-cuda kernels. An independent implementation
+  of the KernelOPT method (profile -> plan -> edit -> verify -> gate) with a
+  four-gate verification cascade.
+type: software
+license: Apache-2.0
+repository-code: https://github.com/giveen/KernelOPT
+authors:
+  - alias: giveen
+    email: ajaxx20020@gmail.com
+references:
+  - type: article
+    title: "KernelOPT: Dispatch-Aware Agentic Search for GPU Kernel Optimization"
+    authors:
+      - family-names: Poddar
+        given-names: Aheli
+      - family-names: Prasad
+        given-names: Sanskar
+      - family-names: Samanta
+        given-names: Arindam
+      - family-names: Chakraborty
+        given-names: Subha
+      - family-names: Goyal
+        given-names: Vishal
+      - family-names: Rathaur
+        given-names: Rohit Singh
+    year: 2026
+    journal: arXiv
+    eprint: 2609.30059
+    archive-prefix: arXiv
+    primary-class: cs.DC
+    url: https://arxiv.org/abs/2609.30059

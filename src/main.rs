@@ -117,6 +117,12 @@ enum Cmd {
         /// Tail the journal live in this terminal (no second terminal needed).
         #[arg(long)]
         watch: bool,
+        /// Pin the representative bench shape (substring of the bench row label).
+        #[arg(long)]
+        bench_shape: Option<String>,
+        /// Interleaved baseline/candidate re-bench rounds at finalize (default 2).
+        #[arg(long, default_value_t = 2)]
+        final_rounds: u32,
         /// Executor edit format: `full` (whole file, default) | `patch` (unified diff).
         /// This is internal only — the run always outputs a reviewable unified diff.
         #[arg(long, default_value = "full")]
@@ -168,6 +174,12 @@ enum Cmd {
         /// Tail the journal live in this terminal (no second terminal needed).
         #[arg(long)]
         watch: bool,
+        /// Pin the representative bench shape (substring of the bench row label).
+        #[arg(long)]
+        bench_shape: Option<String>,
+        /// Interleaved baseline/candidate re-bench rounds at finalize (default 2).
+        #[arg(long, default_value_t = 2)]
+        final_rounds: u32,
         /// Executor edit format: `full` (whole file, default) | `patch` (unified diff).
         /// This is internal only — the run always outputs a reviewable unified diff.
         #[arg(long, default_value = "full")]
@@ -240,6 +252,12 @@ enum Cmd {
         /// Tail the journal live in this terminal (no second terminal needed).
         #[arg(long)]
         watch: bool,
+        /// Pin the representative bench shape (substring of the bench row label).
+        #[arg(long)]
+        bench_shape: Option<String>,
+        /// Interleaved baseline/candidate re-bench rounds at finalize (default 2).
+        #[arg(long, default_value_t = 2)]
+        final_rounds: u32,
         /// Executor edit format: `full` (whole file, default) | `patch` (unified diff).
         /// This is internal only — the run always outputs a reviewable unified diff.
         #[arg(long, default_value = "full")]
@@ -358,6 +376,11 @@ enum Cmd {
         /// Emit JSON instead of tables.
         #[arg(long)]
         json: bool,
+    },
+    /// Aggregate a campaign into a self-benchmark (win rate, speedups, cost).
+    Eval {
+        /// Campaign id.
+        campaign_id: String,
     },
     /// Render the final markdown report for a run.
     Report {
@@ -545,7 +568,7 @@ fn main() -> Result<()> {
             Ok(())
         }
 
-        Cmd::RunNinfer { op, repo, llm: llm_args, kernel_file, build_dir, bench_args, e2e_weights, e2e_engine, e2e_cmd, e2e_prompt, e2e_max_new, run_id, ncu_set, quiet, watch, edit_mode, loop_ } => {
+        Cmd::RunNinfer { op, repo, llm: llm_args, kernel_file, build_dir, bench_args, e2e_weights, e2e_engine, e2e_cmd, e2e_prompt, e2e_max_new, run_id, ncu_set, quiet, watch, bench_shape, final_rounds, edit_mode, loop_ } => {
             let repo = resolve_repo(repo, &["NINFER_REPO"], "NINFER_REPO")?;
             let backend = Backend::Ninfer;
             let cfg = load_cuda_config(&llm_args, &loop_, ProfilerMode::Ncu, ncu_set)?;
@@ -577,6 +600,8 @@ fn main() -> Result<()> {
                 edit_mode: EditMode::parse(&edit_mode)?,
                 verbose: !quiet && !watch,
                 watch,
+                bench_shape,
+                final_rounds,
             })?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             if result.paused {
@@ -585,7 +610,7 @@ fn main() -> Result<()> {
             Ok(())
         }
 
-        Cmd::RunLlamacpp { op, repo, llm: llm_args, kernel_file, build_dir, bench_args, e2e_weights, e2e_engine, e2e_cmd, e2e_prompt, e2e_max_new, run_id, ncu_set, quiet, watch, edit_mode, loop_ } => {
+        Cmd::RunLlamacpp { op, repo, llm: llm_args, kernel_file, build_dir, bench_args, e2e_weights, e2e_engine, e2e_cmd, e2e_prompt, e2e_max_new, run_id, ncu_set, quiet, watch, bench_shape, final_rounds, edit_mode, loop_ } => {
             let repo = resolve_repo(repo, &["LLAMACPP_REPO"], "LLAMACPP_REPO")?;
             let backend = Backend::Llamacpp;
             let cfg = load_cuda_config(&llm_args, &loop_, ProfilerMode::Ncu, ncu_set)?;
@@ -617,6 +642,8 @@ fn main() -> Result<()> {
                 edit_mode: EditMode::parse(&edit_mode)?,
                 verbose: !quiet && !watch,
                 watch,
+                bench_shape,
+                final_rounds,
             })?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             if result.paused {
@@ -647,6 +674,8 @@ fn main() -> Result<()> {
             profile_trace,
             quiet,
             watch,
+            bench_shape,
+            final_rounds,
             edit_mode,
             llm: llm_args,
             loop_,
@@ -693,6 +722,8 @@ fn main() -> Result<()> {
                 edit_mode: EditMode::parse(&edit_mode)?,
                 verbose: !quiet && !watch,
                 watch,
+                bench_shape,
+                final_rounds,
             };
             let state = campaign::run_campaign(
                 &cfg,
@@ -961,6 +992,8 @@ fn main() -> Result<()> {
 
         Cmd::Analyze { run_id, json } => analyze_run(&run_id, json),
 
+        Cmd::Eval { campaign_id } => eval_campaign(&campaign_id),
+
         Cmd::Report { run_id } => {
             let events = Journal::replay(&mock_runs_dir()?, &run_id)?;
             print_report(&run_id, &events);
@@ -1059,6 +1092,8 @@ struct SingleRunOpts {
     interrupted: Arc<AtomicBool>,
     verbose: bool,
     watch: bool,
+    bench_shape: Option<String>,
+    final_rounds: u32,
     edit_mode: EditMode,
 }
 
@@ -1125,6 +1160,8 @@ fn run_single(
         interrupted: Some(opts.interrupted),
         verbose: opts.verbose,
         watch: opts.watch,
+        bench_shape: opts.bench_shape,
+        final_rounds: opts.final_rounds,
     };
     pipe.run()
 }
@@ -1321,6 +1358,84 @@ fn analyze_run(run_id: &str, json: bool) -> Result<()> {
         );
     }
     print_winner(&events);
+    Ok(())
+}
+
+/// Aggregate a campaign into a self-benchmark: win rate, speedup distribution,
+/// failure taxonomy, and token cost (across every target's journal).
+fn eval_campaign(campaign_id: &str) -> Result<()> {
+    let state = campaign::load(campaign_id)?;
+    let runs_dir = mock_runs_dir()?;
+    let mut cats: BTreeMap<String, u32> = BTreeMap::new();
+    let mut causes: BTreeMap<String, u32> = BTreeMap::new();
+    let mut speedups: Vec<f64> = Vec::new();
+    let mut tokens = 0u64;
+    let mut calls = 0u64;
+
+    for t in &state.targets {
+        if let Some(rid) = &t.run_id {
+            if let Ok(events) = Journal::replay(&runs_dir, rid) {
+                for e in &events {
+                    match e {
+                        Event::AttemptFailed { category, .. } => {
+                            *cats.entry(category.clone()).or_default() += 1
+                        }
+                        Event::LlmCall { prompt_tokens, completion_tokens, .. } => {
+                            tokens += prompt_tokens + completion_tokens;
+                            calls += 1;
+                        }
+                        Event::RunFinished { root_cause: Some(c), .. } => {
+                            *causes.entry(c.clone()).or_default() += 1
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if let Some(s) = t.best_speedup {
+            speedups.push(s);
+        }
+    }
+
+    let count = |status: &str| state.targets.iter().filter(|t| t.status == status).count();
+    let optimized = count("optimized");
+    let matched = count("matched");
+    let fallback = count("fallback");
+    let failed = count("failed");
+    speedups.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let med = speedups.get(speedups.len() / 2).copied().unwrap_or(1.0);
+    let max = speedups.last().copied().unwrap_or(1.0);
+    let wins = speedups.iter().filter(|s| **s > 1.0).count();
+
+    println!("campaign {campaign_id}: {} targets", state.targets.len());
+    println!(
+        "outcomes: optimized {optimized}  matched {matched}  fallback {fallback}  failed {failed}"
+    );
+    println!(
+        "speedups: median {med:.3}x  max {max:.3}x  wins(>1.0x) {wins}/{}",
+        state.targets.len()
+    );
+    println!(
+        "failures: {}",
+        cats.iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("  ")
+    );
+    println!(
+        "cost: {calls} LLM calls, {tokens} tokens  ({} tokens / optimized target)",
+        tokens / optimized.max(1) as u64
+    );
+    if !causes.is_empty() {
+        println!(
+            "fallback causes: {}",
+            causes
+                .iter()
+                .map(|(k, v)| format!("{v}× {k}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
     Ok(())
 }
 

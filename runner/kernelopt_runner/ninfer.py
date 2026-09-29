@@ -588,7 +588,7 @@ def cuda_bench(request: dict) -> dict:
             "noise_pct": None,
             "row_count": 0,
         }
-    merged = _merge_bench_runs(parsed_runs)
+    merged = _merge_bench_runs(parsed_runs, request.get("shape_filter"))
     return {
         "ok": True,
         "passed": proc.returncode == 0 and merged["representative_us"] is not None,
@@ -603,11 +603,12 @@ def cuda_bench(request: dict) -> dict:
     }
 
 
-def _merge_bench_runs(runs: list[dict]) -> dict:
+def _merge_bench_runs(runs: list[dict], shape_filter: str | None = None) -> dict:
     """Aggregate repeated bench runs per shape (row index).
 
-    `representative_us` is the *slowest* shape's median across repeats — the
-    least launch-overhead-dominated, most stable comparison point.
+    The representative row is the one whose label contains `shape_filter` (when
+    given), else the *slowest* shape — the least launch-overhead-dominated, most
+    stable comparison point.
     `noise_pct` is the median relative spread across repeats (measurement noise).
     """
     n = min(len(r["rows"]) for r in runs)
@@ -623,6 +624,7 @@ def _merge_bench_runs(runs: list[dict]) -> dict:
             "median_us": med,
             "min_us": min(vals),
             "max_us": max(vals),
+            "samples": vals,
             "label": runs[0]["rows"][i].get("label"),
             "line": runs[0]["rows"][i].get("line"),
         }
@@ -630,13 +632,20 @@ def _merge_bench_runs(runs: list[dict]) -> dict:
             spreads.append((max(vals) - min(vals)) / med)
         rows.append(row)
     medians = [r["median_us"] for r in rows]
-    representative = max(rows, key=lambda r: r["median_us"]) if rows else None
+    candidates = rows
+    if shape_filter:
+        f = shape_filter.lower()
+        matching = [r for r in rows if f in (r.get("label") or "").lower()]
+        if matching:
+            candidates = matching
+    representative = max(candidates, key=lambda r: r["median_us"]) if candidates else None
     return {
         "rows": rows,
         "row_count": len(rows),
         "median_us": statistics.median(medians) if medians else None,
-        "representative_us": max(medians) if medians else None,
+        "representative_us": (representative or {}).get("median_us"),
         "representative_label": (representative or {}).get("label"),
+        "representative_samples": (representative or {}).get("samples"),
         "noise_pct": statistics.median(spreads) if spreads else None,
     }
 

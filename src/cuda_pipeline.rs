@@ -61,6 +61,10 @@ pub struct CudaPipeline<'a> {
     pub baseline_e2e: Option<E2eResult>,
     /// Base commit of the worktree (candidates are reset to this).
     pub base_sha: Option<String>,
+    /// Pin the representative bench shape (substring of the bench row label).
+    pub bench_shape: Option<String>,
+    /// Interleaved baseline/candidate re-bench rounds at finalize.
+    pub final_rounds: u32,
     /// Measurement noise (relative spread) from the most recent bench.
     pub last_bench_noise_pct: Option<f64>,
     /// Label of the shape used for the representative measurement.
@@ -309,12 +313,14 @@ impl<'a> CudaPipeline<'a> {
                 "warmup": 20,
                 "repeat": 100,
                 "repeats": 3,
+                "shape_filter": self.bench_shape,
             }),
             Backend::Llamacpp => json!({
                 "build_dir": self.build_dir,
                 "ops": self.target.test_filters,
                 "args": self.target.bench_args,
                 "repeats": 3,
+                "shape_filter": self.bench_shape,
             }),
         }
     }
@@ -535,22 +541,12 @@ impl<'a> CudaPipeline<'a> {
         diversity_hint: bool,
         recent_directions: &[String],
     ) -> Result<PlannedChange> {
-        let system = self.render_prompt(
-            "cuda-planner.md",
-            &json!({
-                "diversity_hint": if diversity_hint {
-                    "DIVERSITY ENFORCEMENT: recent plans collapsed to few unique approaches. \
-                     Choose a DIFFERENT strategy family this time."
-                } else { "" },
-                "avoid_flags": self.tracker.avoid_flags(&self.target.family).join(", "),
-                "memory_context": truncate_chars(&self.memory.context(), 1200),
-                "recent_directions": if recent_directions.is_empty() { "(none)".to_string() }
-                    else { recent_directions.join("; ") },
-            }),
-        )?;
+        // Static system prompt so the request prefix is cacheable by the provider.
+        let system = self.render_prompt("cuda-planner.md", &json!({}))?;
         let (context_label, context) = self.planner_context(kernel_source);
         // Bound the profiling context so it doesn't dominate the prompt.
         let ctx_str = truncate_chars(&profiling_ctx.to_string(), 1500);
+        // Stable prefix first (target, contract, source/outline, profiling)…
         let mut user = format!(
             "BACKEND: {backend}\nOP: {op}  (family: {family}{variant})\n\
              TARGET KERNEL FILE: {file}\n\
@@ -569,6 +565,24 @@ impl<'a> CudaPipeline<'a> {
             context = context,
             ctx = ctx_str,
         );
+        // …variable context last, so it does not break prefix caching.
+        user.push_str(&format!(
+            "\n\nMEMORY (past attempts):\n{mem}\n\nKNOWN-BAD DIRECTIONS: {avoid}\n\n\
+             RECENT DIRECTIONS (avoid repeats): {recent}\n\n{diversity}",
+            mem = truncate_chars(&self.memory.context(), 1200),
+            avoid = self.tracker.avoid_flags(&self.target.family).join(", "),
+            recent = if recent_directions.is_empty() {
+                "(none)".to_string()
+            } else {
+                recent_directions.join("; ")
+            },
+            diversity = if diversity_hint {
+                "DIVERSITY ENFORCEMENT: recent plans collapsed to few unique approaches. \
+                 Choose a DIFFERENT strategy family this time."
+            } else {
+                ""
+            },
+        ));
 
         let tools = vec![
             ToolDef {
@@ -733,14 +747,15 @@ impl<'a> CudaPipeline<'a> {
             ));
         }
         let base_user = format!(
-            "BACKEND: {backend}\nOPTIMIZATION PLAN:\n{plan}\n\nTARGET FILE: {file}\n\n\
+            "BACKEND: {backend}\nTARGET FILE: {file}\n\n\
              CONTRACT HEADER (read-only semantic authority — do not change its semantics):\n{authority}\n\n\
-             CURRENT CONTENT:\n```cuda\n{src}\n```",
+             CURRENT CONTENT:\n```cuda\n{src}\n```\n\n\
+             OPTIMIZATION PLAN:\n{plan}",
             backend = self.target.backend.as_str(),
-            plan = plan.change,
             file = self.target.target_file,
             authority = self.authority_block(),
             src = kernel_source,
+            plan = plan.change,
         );
         let tools = vec![match self.edit_mode {
             EditMode::Full => ToolDef {
@@ -1088,6 +1103,22 @@ impl<'a> CudaPipeline<'a> {
         let mut iterations_run = 0u32;
         let mut stop_reason = "max_iterations";
 
+        // Beam frontier: start with the baseline as the root node. Chains expand
+        // frontier nodes so improvements can compose (paper Algorithm 1).
+        let mut frontier: Vec<Candidate> = vec![Candidate {
+            id: "baseline".into(),
+            chain: 0,
+            iteration: 0,
+            source: baseline_source.clone(),
+            plan: "(baseline)".into(),
+            latency_ms: if baseline_ms > 0.0 { Some(baseline_ms) } else { None },
+            passed: true,
+            commit: None,
+            change_summary: None,
+            hints: None,
+            evidence: None,
+        }];
+
         // Resume an interrupted target: restore the search state saved after the
         // last completed iteration (never repeats finished LLM work).
         if let Some(cp) = self.load_checkpoint() {
@@ -1129,10 +1160,13 @@ impl<'a> CudaPipeline<'a> {
                 best.as_ref().and_then(|b| b.latency_ms).map(|m| format!("{m:.4} ms")).unwrap_or_else(|| "—".into()),
             ));
             let prev_best = best_ms;
-            let mut candidates: Vec<Candidate> = Vec::new();
+            let mut children: Vec<Candidate> = Vec::new();
             let diversity_hint = meltdown_detected(&recent_directions, 6, 2);
 
-            for chain in 0..self.cfg.hyper.b_beam.max(1) {
+            // Expand each frontier node (the paper's beam). Chains build on the
+            // best-so-far rather than always restarting from the baseline.
+            for (chain, parent) in frontier.iter().enumerate() {
+                let chain_u = chain as u32;
                 if self.interrupted() {
                     stop_reason = "interrupted";
                     self.save_checkpoint(iteration, iterations_run, &best, best_ms, baseline_ms, &recent_directions, patience_used);
@@ -1143,18 +1177,20 @@ impl<'a> CudaPipeline<'a> {
                     self.save_checkpoint(iteration, iterations_run, &best, best_ms, baseline_ms, &recent_directions, patience_used);
                     break 'outer;
                 }
+                // Start from the parent node's source (its commit, or its content).
                 self.reset_worktree()?;
+                std::fs::write(self.target_path(), &parent.source)?;
                 let plan = self.stage_plan(
-                    &baseline_source,
+                    &parent.source,
                     &profiling_ctx,
                     diversity_hint,
                     &recent_directions,
                 )?;
                 if plan.change.is_empty() {
-                    self.progress(format!("  c{chain} no plan; skipping this chain"));
+                    self.progress(format!("  c{chain} no plan; skipping"));
                     self.journal.record(&Event::CandidateEvaluated {
                         iteration,
-                        chain,
+                        chain: chain_u,
                         plan: "(no plan)".into(),
                         passed: false,
                         latency_ms: None,
@@ -1167,13 +1203,17 @@ impl<'a> CudaPipeline<'a> {
                     continue;
                 }
                 recent_directions.push(plan.change.clone());
-                self.progress(format!("  c{chain} plan: {}", flatten(&plan.change)));
+                self.progress(format!(
+                    "  c{chain} (from {}) plan: {}",
+                    parent.id,
+                    flatten(&plan.change)
+                ));
 
                 let (cand, last_error) =
-                    self.stage_execute_and_verify(&baseline_source, &plan, chain, iteration)?;
+                    self.stage_execute_and_verify(&parent.source, &plan, chain_u, iteration)?;
                 self.journal.record(&Event::CandidateEvaluated {
                     iteration,
-                    chain,
+                    chain: chain_u,
                     plan: plan.change.clone(),
                     passed: cand.passed,
                     latency_ms: cand.latency_ms,
@@ -1200,7 +1240,7 @@ impl<'a> CudaPipeline<'a> {
                             String::new()
                         }
                     ));
-                    self.stage_summarize(&baseline_source, &cand.source, &plan.change, speedup, iteration)?;
+                    self.stage_summarize(&parent.source, &cand.source, &plan.change, speedup, iteration)?;
                     if let Some(ms) = cand.latency_ms {
                         if ms < best_ms {
                             best_ms = ms;
@@ -1214,13 +1254,16 @@ impl<'a> CudaPipeline<'a> {
                     {
                         best = Some(cand.clone());
                     }
-                    candidates.push(cand);
+                    children.push(cand);
                 } else if let Some(err) = &last_error {
                     self.progress(format!("  c{chain} ✗ {}", flatten(err)));
                 }
             }
 
-            let _ = diverse_select(&candidates, self.cfg.hyper.b_beam as usize);
+            let selected = diverse_select(&children, self.cfg.hyper.b_beam as usize);
+            if !selected.is_empty() {
+                frontier = selected;
+            }
 
             // Improvement accounting drives patience termination.
             if best_ms < prev_best * (1.0 - self.min_improvement) {
@@ -1313,39 +1356,43 @@ impl<'a> CudaPipeline<'a> {
         iterations: u32,
         stop_reason: &str,
     ) -> Result<PipelineResult> {
-        // Materialize the winner: fast git revert to its commit when available,
-        // else reset to base and write the source.
-        match &best.commit {
-            Some(sha) => {
-                let resp = self.call(
-                    "cuda_worktree",
-                    json!({"worktree_dir": self.worktree, "action": "revert", "ref": sha}),
-                )?;
-                if resp["ok"] != json!(true) {
-                    anyhow::bail!("revert to winner commit failed: {resp}");
-                }
-            }
-            None => {
-                self.reset_worktree()?;
-                std::fs::write(self.target_path(), &best.source)?;
-            }
-        }
-
-        let compile = self.call_timeout(
-            "cuda_compile",
-            json!({"worktree": self.worktree, "build_dir": self.build_dir,
-                   "targets": self.compile_targets(), "jobs": num_cpus()}),
-            3600,
-        )?;
-        let verify = self
-            .call_timeout(self.verify_command(), self.verify_request(), 1800)?;
+        // Materialize the winner, rebuild, re-test (Gates 1–2).
+        self.materialize_winner(&best)?;
+        let compile = self.compile_now()?;
+        let verify = self.verify_now()?;
         let gate1_2 = compile["passed"] == json!(true) && verify["passed"] == json!(true);
 
+        // Gate 4: interleaved fresh baseline/candidate benches so drift cancels
+        // and we can require the candidate to win in every round (sign test).
+        let mut baseline_final_ms = baseline_ms;
+        let mut wins = 0u32;
+        let mut rounds = 0u32;
         let final_ms = if gate1_2 && self.target.timing {
-            self.bench(None).ok()
+            let base_ref = self.base_sha.clone().unwrap_or_else(|| "HEAD".to_string());
+            let mut bases: Vec<f64> = Vec::new();
+            let mut cands: Vec<f64> = Vec::new();
+            for _ in 0..self.final_rounds.max(1) {
+                self.revert_ref(&base_ref)?;
+                let _ = self.compile_now()?;
+                let b = self.bench(None)?;
+                self.materialize_winner(&best)?;
+                let _ = self.compile_now()?;
+                let c = self.bench(None)?;
+                if c < b {
+                    wins += 1;
+                }
+                bases.push(b);
+                cands.push(c);
+            }
+            rounds = bases.len() as u32;
+            baseline_final_ms = median(&bases).unwrap_or(baseline_ms);
+            median(&cands)
         } else {
             None
         };
+        // Leave the worktree at the winner for the diff below.
+        self.materialize_winner(&best)?;
+        let _ = self.compile_now()?;
 
         // Model-level Gate 3: the whole engine must produce the SAME tokens and
         // not be slower. Compares the candidate build against the baseline build.
@@ -1379,7 +1426,7 @@ impl<'a> CudaPipeline<'a> {
             true // correctness-only target: no perf gate
         } else {
             final_ms
-                .map(|ms| ms <= baseline_ms * self.cfg.hyper.gamma)
+                .map(|ms| ms <= baseline_final_ms * self.cfg.hyper.gamma)
                 .unwrap_or(false)
         };
 
@@ -1398,11 +1445,15 @@ impl<'a> CudaPipeline<'a> {
             detail: json!({
                 "gate1_2": gate1_2,
                 "gate3": gate3,
-                "gate4": {"passed": gate4, "final_ms": final_ms, "baseline_ms": baseline_ms,
+                "gate4": {"passed": gate4, "final_ms": final_ms,
+                          "baseline_ms": baseline_final_ms,
+                          "baseline_ms_initial": baseline_ms,
                           "gamma": self.cfg.hyper.gamma,
                           "noise_pct": self.last_bench_noise_pct,
                           "shape": self.last_bench_label,
-                          "runs": 3},
+                          "runs": 3,
+                          "rounds": rounds,
+                          "wins": wins},
                 "diff_files": diff["file_count"],
                 "diff_insertions": diff["insertions"],
                 "diff_deletions": diff["deletions"],
@@ -1412,15 +1463,17 @@ impl<'a> CudaPipeline<'a> {
             }),
         })?;
 
-        let speedup = final_ms.map(|m| if m > 0.0 { baseline_ms / m } else { 1.0 });
-        // Only call it "optimized" if the gain exceeds the measured noise floor.
+        let speedup = final_ms.map(|m| if m > 0.0 { baseline_final_ms / m } else { 1.0 });
+        // "Optimized" requires: beats the fresh baseline by more than the noise
+        // floor and the minimum effect, AND wins every interleaved round.
         let noise = self.last_bench_noise_pct.unwrap_or(0.0);
         let improvement = final_ms
-            .map(|m| if m > 0.0 { baseline_ms / m - 1.0 } else { 0.0 })
+            .map(|m| if m > 0.0 { baseline_final_ms / m - 1.0 } else { 0.0 })
             .unwrap_or(0.0);
         let within_noise = improvement <= noise;
+        let won_all = rounds == 0 || wins == rounds;
         let (outcome, root_cause) = if passed {
-            if !self.target.timing || (improvement > self.min_improvement && !within_noise) {
+            if !self.target.timing || (improvement > self.min_improvement && !within_noise && won_all) {
                 ("optimized", None)
             } else {
                 ("matched", None)
@@ -1447,22 +1500,26 @@ impl<'a> CudaPipeline<'a> {
             "why": best.evidence,
             "how": best.hints,
             "final_ms": final_ms,
-            "baseline_ms": baseline_ms,
+            "baseline_ms": baseline_final_ms,
             "speedup": speedup,
             "noise_pct": noise,
             "within_noise": within_noise,
+            "rounds": rounds,
+            "wins": wins,
             "measurement": json!({
                 "scope": "op",
                 "metric": "median latency",
                 "unit": "ms",
                 "shape": self.last_bench_label,
                 "runs": 3,
-                "baseline_ms": baseline_ms,
+                "rounds": rounds,
+                "wins": wins,
+                "baseline_ms": baseline_final_ms,
                 "final_ms": final_ms,
                 "speedup": speedup,
                 "noise_pct": noise,
                 "within_noise": within_noise,
-                "note": "op-level bench (ninfer_<op>_bench); not an end-to-end model speedup",
+                "note": "op-level bench; interleaved fresh baseline/candidate, 3 repeats each; not an end-to-end model speedup",
             }),
         });
         Ok(PipelineResult {
@@ -1593,8 +1650,45 @@ impl<'a> CudaPipeline<'a> {
         format!("kernelopt/{}-{}", self.target.backend.as_str(), self.target.op)
     }
 
-    fn reset_worktree(&self) -> Result<()> {
-        let base = self.base_sha.clone().unwrap_or_else(|| "HEAD".to_string());
+    // ---------- finalize helpers ----------
+
+    fn compile_now(&self) -> Result<serde_json::Value> {
+        self.call_timeout(
+            "cuda_compile",
+            json!({"worktree": self.worktree, "build_dir": self.build_dir,
+                   "targets": self.compile_targets(), "jobs": num_cpus()}),
+            3600,
+        )
+    }
+
+    fn verify_now(&self) -> Result<serde_json::Value> {
+        self.call_timeout(self.verify_command(), self.verify_request(), 1800)
+    }
+
+    fn revert_ref(&self, r: &str) -> Result<()> {
+        let resp = self.call(
+            "cuda_worktree",
+            json!({"worktree_dir": self.worktree, "action": "revert", "ref": r}),
+        )?;
+        if resp["ok"] != json!(true) {
+            anyhow::bail!("revert to {r} failed: {resp}");
+        }
+        Ok(())
+    }
+
+    /// Put the worktree exactly at the winning candidate (git revert, or reset+write).
+    fn materialize_winner(&self, best: &Candidate) -> Result<()> {
+        match &best.commit {
+            Some(sha) => self.revert_ref(sha),
+            None => {
+                self.reset_worktree()?;
+                std::fs::write(self.target_path(), &best.source)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn reset_worktree(&self) -> Result<()> {        let base = self.base_sha.clone().unwrap_or_else(|| "HEAD".to_string());
         let resp = self.call(
             "cuda_worktree",
             json!({"worktree_dir": self.worktree, "base": base, "action": "reset"}),
@@ -1780,6 +1874,16 @@ pub fn winner_summary(events: &[Event]) -> Option<serde_json::Value> {
 
 fn num_cpus() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+}
+
+/// Median of a slice of floats (None when empty).
+fn median(v: &[f64]) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(s[s.len() / 2])
 }
 
 fn compact(v: &serde_json::Value) -> String {

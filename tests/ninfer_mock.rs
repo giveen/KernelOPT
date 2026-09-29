@@ -111,6 +111,8 @@ fn ninfer_identity_walk_add_bias() {
         interrupted: None,
         verbose: false,
         watch: false,
+        bench_shape: None,
+        final_rounds: 1,
     };
 
     let result = pipe.run().unwrap();

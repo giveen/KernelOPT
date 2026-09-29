@@ -55,6 +55,10 @@ pub struct CampaignOptions {
     pub verbose: bool,
     /// Tail the journal live in this terminal.
     pub watch: bool,
+    /// Pin the representative bench shape (substring match on the row label).
+    pub bench_shape: Option<String>,
+    /// Interleaved baseline/candidate re-bench rounds at finalize.
+    pub final_rounds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -397,6 +401,8 @@ fn run_one_target(
         interrupted: Some(opts.interrupted.clone()),
         verbose: opts.verbose,
         watch: opts.watch,
+        bench_shape: opts.bench_shape.clone(),
+        final_rounds: opts.final_rounds,
     };
     pipe.run()
 }
