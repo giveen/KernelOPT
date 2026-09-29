@@ -20,3 +20,4 @@ pub mod runner_bridge;
 pub mod search;
 pub mod signals;
 pub mod tools;
+pub mod wizard;

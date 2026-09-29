@@ -421,6 +421,35 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Interactive setup: detect what it can, ask a few questions, then run it.
+    Wizard {
+        /// Target checkout (else NINFER_REPO/LLAMACPP_REPO, else prompt).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Backend: auto | ninfer | llamacpp.
+        #[arg(long)]
+        mode: Option<String>,
+        /// Optimize this op only (else choose from the discovered list).
+        #[arg(long)]
+        op: Option<String>,
+        /// Optimize every target (campaign) without asking.
+        #[arg(long)]
+        all: bool,
+        /// Engine-E2E model: a path, a name, or `auto`.
+        #[arg(long)]
+        e2e_weights: Option<String>,
+        /// Loop preset: quick | standard | thorough.
+        #[arg(long)]
+        preset: Option<String>,
+        /// Accept detected defaults with no prompts (scripts/CI).
+        #[arg(long)]
+        yes: bool,
+        /// Print the equivalent command and exit (run nothing).
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        llm: LlmArgs,
+    },
 }
 
 #[derive(clap::Args, Clone)]
@@ -1050,6 +1079,10 @@ fn main() -> Result<()> {
         }
 
         Cmd::Models { mode, repo, json } => list_models(mode, repo, json),
+
+        Cmd::Wizard { repo, mode, op, all, e2e_weights, preset, yes, dry_run, llm } => {
+            wizard(repo, mode, op, all, e2e_weights, preset, yes, dry_run, llm)
+        }
     }
 }
 
@@ -1326,6 +1359,200 @@ fn providers(
         }
     }
     Ok(())
+}
+
+/// Interactive setup: detect what it can, ask the few real choices, run it.
+#[allow(clippy::too_many_arguments)]
+fn wizard(
+    repo: Option<String>,
+    mode: Option<String>,
+    op: Option<String>,
+    all: bool,
+    e2e_weights: Option<String>,
+    preset: Option<String>,
+    yes: bool,
+    dry_run: bool,
+    llm: LlmArgs,
+) -> Result<()> {
+    // 1. Target checkout: flag -> env -> prompt.
+    let repo_spec = repo
+        .or_else(|| env_opt("NINFER_REPO"))
+        .or_else(|| env_opt("LLAMACPP_REPO"));
+    let repo_spec = match repo_spec {
+        Some(r) => r,
+        None if yes => {
+            anyhow::bail!("no target checkout: pass --repo or set NINFER_REPO/LLAMACPP_REPO")
+        }
+        None => ask_line("Target checkout path: ")?,
+    };
+    let repo = PathBuf::from(kernelopt::dotenv::expand_tilde(&repo_spec));
+    if !repo.is_dir() {
+        anyhow::bail!(
+            "repo not found: {} (set NINFER_REPO/LLAMACPP_REPO or pass --repo)",
+            repo.display()
+        );
+    }
+    let backend = backend::resolve_backend(&repo, mode.as_deref())?;
+    println!("· target: {}  ({})", repo.display(), backend.as_str());
+
+    // 2. Targets.
+    let targets = backend::discover_targets(&repo, backend)?;
+    if targets.is_empty() {
+        anyhow::bail!("no optimizable targets in {}", repo.display());
+    }
+    println!("· {} target(s) discovered", targets.len());
+    let (op, all) = if let Some(op) = op {
+        (Some(op), false)
+    } else if all || yes {
+        (None, true)
+    } else {
+        choose_target(&targets)?
+    };
+
+    // 3. Optimizer LLM (accept the resolved .env defaults by default).
+    let resolved = llm.resolve();
+    let (provider, model) = if yes {
+        (resolved.provider, resolved.model)
+    } else {
+        prompt_llm(resolved)?
+    };
+    println!("· optimizer: {provider}/{model}");
+
+    // 4. Engine-E2E model (optional).
+    let e2e = if let Some(e) = e2e_weights {
+        Some(e)
+    } else if yes {
+        None
+    } else {
+        choose_e2e(&repo, backend)?
+    };
+
+    // 5. Loop preset.
+    let preset = if let Some(p) = preset {
+        p
+    } else if yes {
+        "standard".into()
+    } else {
+        choose_preset()?
+    };
+    let (iterations, beam) = kernelopt::wizard::preset(&preset);
+    println!("· preset: {preset} ({iterations} iterations, beam {beam})");
+
+    let plan = kernelopt::wizard::Plan {
+        backend,
+        repo,
+        op,
+        all,
+        provider,
+        model,
+        e2e,
+        iterations,
+        beam,
+        watch: true,
+    };
+
+    println!("\n  {}\n", plan.display());
+    if dry_run {
+        return Ok(());
+    }
+    if !yes && !confirm("Run this now?", true)? {
+        println!("not run.");
+        return Ok(());
+    }
+    // Re-invoke ourselves with exactly this argv (same code path as the CLI).
+    let exe = std::env::current_exe().context("current_exe")?;
+    let status = std::process::Command::new(exe).args(plan.argv()).status()?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+fn ask_line(prompt: &str) -> Result<String> {
+    use std::io::Write;
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    let mut s = String::new();
+    std::io::stdin().read_line(&mut s).context("reading stdin")?;
+    Ok(s.trim().to_string())
+}
+
+fn confirm(prompt: &str, default: bool) -> Result<bool> {
+    let d = if default { "[Y/n]" } else { "[y/N]" };
+    let a = ask_line(&format!("{prompt} {d} "))?;
+    Ok(match a.to_ascii_lowercase().as_str() {
+        "" => default,
+        "y" | "yes" => true,
+        "n" | "no" => false,
+        _ => default,
+    })
+}
+
+fn choose_target(targets: &[Target]) -> Result<(Option<String>, bool)> {
+    println!("\nWhich target?");
+    println!("   0) all of them  (campaign)");
+    for (i, t) in targets.iter().enumerate() {
+        let variant = t.variant.as_deref().map(|v| format!("/{v}")).unwrap_or_default();
+        println!("  {:>2}) {}  ({}{})", i + 1, t.op, t.family, variant);
+    }
+    let n = targets.len();
+    let ans = ask_line(&format!("choose [0-{n}, default 0]: "))?;
+    match kernelopt::wizard::parse_choice(&ans, n).unwrap_or(0) {
+        0 => Ok((None, true)),
+        k => Ok((Some(targets[k - 1].op.clone()), false)),
+    }
+}
+
+fn choose_e2e(repo: &std::path::Path, backend: Backend) -> Result<Option<String>> {
+    let models = kernelopt::models::discover(repo, Some(backend.as_str()));
+    if models.is_empty() {
+        println!("· engine E2E: no local models found — skipping (set KERNELOPT_MODELS_DIR to enable)");
+        return Ok(None);
+    }
+    println!("\nEngine E2E model (Gate 3 — proves the kernel helps a real model):");
+    println!("   0) skip");
+    let n = models.len().min(12);
+    for (i, m) in models.iter().take(n).enumerate() {
+        println!(
+            "  {:>2}) {}  ({}, {})",
+            i + 1,
+            m.name,
+            m.engine,
+            kernelopt::models::human_size(m.size_bytes)
+        );
+    }
+    let ans = ask_line(&format!("choose [0-{n}, default 0]: "))?;
+    Ok(match kernelopt::wizard::parse_choice(&ans, n).unwrap_or(0) {
+        0 => None,
+        k => Some(models[k - 1].name.clone()),
+    })
+}
+
+fn choose_preset() -> Result<String> {
+    println!("\nHow hard should it search?");
+    for (i, (name, desc)) in kernelopt::wizard::PRESETS.iter().enumerate() {
+        println!("  {}) {name:<9} {desc}", i + 1);
+    }
+    let n = kernelopt::wizard::PRESETS.len();
+    let ans = ask_line(&format!("choose [1-{n}, default 2]: "))?;
+    let k = kernelopt::wizard::parse_choice(&ans, n).unwrap_or(2);
+    Ok(kernelopt::wizard::PRESETS[k - 1].0.to_string())
+}
+
+fn prompt_llm(resolved: ResolvedLlm) -> Result<(String, String)> {
+    println!(
+        "\nOptimizer LLM (from .env): {}/{}  — verify with `kernelopt providers`",
+        resolved.provider, resolved.model
+    );
+    if confirm("Use it?", true)? {
+        return Ok((resolved.provider, resolved.model));
+    }
+    let provider = ask_line(&format!("provider [{}]: ", resolved.provider))?;
+    let model = ask_line(&format!("model [{}]: ", resolved.model))?;
+    Ok((
+        if provider.is_empty() { resolved.provider } else { provider },
+        if model.is_empty() { resolved.model } else { model },
+    ))
 }
 
 /// List local model artifacts usable for the engine-E2E (Gate 3) check.

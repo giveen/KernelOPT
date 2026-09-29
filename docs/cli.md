@@ -144,6 +144,22 @@ op bench); `run-llamacpp` on a ggml-cuda kernel (`test-backend-ops test|perf`).
 See [ninfer-mode.md](ninfer-mode.md), [llamacpp-mode.md](llamacpp-mode.md), and
 [kernel-editing.md](kernel-editing.md) for how the file is read/edited/patched.
 
+### `wizard` — guided setup
+
+```bash
+kernelopt wizard [--dry-run] [--yes] [--repo DIR] [--op OP] [--all] \
+    [--preset quick|standard|thorough] [--e2e-weights NAME]
+```
+
+Detects the repo (`--repo`, else `NINFER_REPO`/`LLAMACPP_REPO`), the backend, and
+the kernel targets; asks which target (or **all** → campaign), which optimizer
+LLM (defaults from `.env`), an optional engine-E2E model (from `kernelopt
+models`), and a loop preset; then prints and runs the equivalent command.
+
+- `--yes` — accept detected defaults, no prompts (all targets, `standard` preset).
+- `--dry-run` — print the command and exit without running it.
+- Presets set `--iterations`/`--beam`: `quick` 2/1, `standard` 3/2, `thorough` 5/3.
+
 ### `setup-graphsignal` — provision the profiler
 
 Installs Graphsignal into `.kernelopt/graphsignal/venv` (idempotent, nothing
