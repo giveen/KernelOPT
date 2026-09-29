@@ -395,22 +395,8 @@ impl<'a> CudaPipeline<'a> {
     // ---------- baseline ----------
 
     pub fn stage_baseline(&mut self) -> Result<f64> {
-        let wt = self
-            .call(
-                "cuda_worktree",
-                json!({
-                    "repo": self.repo,
-                    "worktree_dir": self.worktree,
-                    "branch": self.branch(),
-                    "base": "HEAD",
-                    "action": "create",
-                    "timeout_s": 600,
-                }),
-            )
-            .context("cuda_worktree create")?;
-        if wt["ok"] != json!(true) {
-            anyhow::bail!("worktree create failed: {wt}");
-        }
+        let wt = crate::git::create(&self.repo, &self.worktree, &self.branch(), "HEAD")
+            .context("worktree create")?;
         self.base_sha = wt["head"].as_str().map(|s| s.to_string());
         self.journal.record(&Event::StageCompleted {
             stage: "worktree".into(),
@@ -915,15 +901,8 @@ impl<'a> CudaPipeline<'a> {
                     EditMode::Patch => {
                         let patch = strip_code_fences(&s);
                         // Apply the diff to the (baseline) worktree file.
-                        let resp = self.call(
-                            "cuda_apply_patch",
-                            json!({"worktree_dir": self.worktree, "patch": patch}),
-                        )?;
-                        if resp["ok"] != json!(true) {
-                            let err = format!(
-                                "patch did not apply: {}",
-                                resp["error"]["message"].as_str().unwrap_or("unknown")
-                            );
+                        if let Err(e) = crate::git::apply_patch(&self.worktree, &patch) {
+                            let err = format!("patch did not apply: {e:#}");
                             self.journal.record(&Event::AttemptFailed {
                                 iteration,
                                 chain: chain_idx,
@@ -1586,10 +1565,8 @@ impl<'a> CudaPipeline<'a> {
             detail: shape_gate.detail(),
         })?;
 
-        let diff = self.call(
-            "cuda_diff",
-            json!({"worktree": self.worktree, "base": self.base_sha.clone().unwrap_or_else(|| "HEAD".into()), "paths": [self.target.target_file]}),
-        )?;
+        let base_ref = self.base_sha.clone().unwrap_or_else(|| "HEAD".into());
+        let diff = crate::git::diff(&self.worktree, &base_ref, &[self.target.target_file.clone()])?;
         let diff_stat = crate::parse::numstat_view(&diff);
         let diff_text = diff["diff"].as_str().unwrap_or("");
         let diff_path = self.run_dir.join("report.diff");
@@ -1852,14 +1829,9 @@ impl<'a> CudaPipeline<'a> {
     }
 
     fn revert_ref(&self, r: &str) -> Result<()> {
-        let resp = self.call(
-            "cuda_worktree",
-            json!({"worktree_dir": self.worktree, "action": "revert", "ref": r}),
-        )?;
-        if resp["ok"] != json!(true) {
-            anyhow::bail!("revert to {r} failed: {resp}");
-        }
-        Ok(())
+        crate::git::revert(&self.worktree, r)
+            .map(|_| ())
+            .with_context(|| format!("revert to {r}"))
     }
 
     /// Put the worktree exactly at the winning candidate (git revert, or reset+write).
@@ -1941,15 +1913,11 @@ impl<'a> CudaPipeline<'a> {
         Ok(ShapeGate::Passed(detail))
     }
 
-    fn reset_worktree(&self) -> Result<()> {        let base = self.base_sha.clone().unwrap_or_else(|| "HEAD".to_string());
-        let resp = self.call(
-            "cuda_worktree",
-            json!({"worktree_dir": self.worktree, "base": base, "action": "reset"}),
-        )?;
-        if resp["ok"] != json!(true) {
-            anyhow::bail!("worktree reset failed: {resp}");
-        }
-        Ok(())
+    fn reset_worktree(&self) -> Result<()> {
+        let base = self.base_sha.clone().unwrap_or_else(|| "HEAD".to_string());
+        crate::git::reset(&self.worktree, &base)
+            .map(|_| ())
+            .context("worktree reset")
     }
 
     /// Commit the current worktree state as a candidate and tag it so it stays
@@ -1963,21 +1931,9 @@ impl<'a> CudaPipeline<'a> {
                 .unwrap_or_else(|| "-".to_string())
         );
         let tag = format!("kernelopt/{}/{}", self.session_id, id);
-        let resp = self
-            .call(
-                "cuda_worktree",
-                json!({
-                    "worktree_dir": self.worktree,
-                    "action": "commit",
-                    "message": message,
-                    "tag": tag,
-                }),
-            )
-            .ok()?;
-        if resp["ok"] != json!(true) {
-            return None;
-        }
-        resp["sha"].as_str().map(|s| s.to_string())
+        crate::git::commit(&self.worktree, &message, Some(&tag))
+            .ok()
+            .and_then(|v| v["sha"].as_str().map(|s| s.to_string()))
     }
 
     // ---------- per-run checkpoint (resume without repeating work) ----------

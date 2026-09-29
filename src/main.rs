@@ -1055,19 +1055,7 @@ fn main() -> Result<()> {
             if !worktree.exists() {
                 anyhow::bail!("no worktree at {} (run the target first)", worktree.display());
             }
-            let runner = RunnerBridge::new(PathBuf::from("runner"));
-            let resp = runner.call(&serde_json::json!({
-                "command": "cuda_worktree",
-                "worktree_dir": worktree,
-                "action": "revert",
-                "ref": to,
-            }))?;
-            if resp["ok"] != serde_json::json!(true) {
-                anyhow::bail!(
-                    "revert failed: {}",
-                    resp["error"]["message"].as_str().unwrap_or("unknown")
-                );
-            }
+            kernelopt::git::revert(&worktree, &to)?;
             println!("reverted {} to {}", worktree.display(), to);
             Ok(())
         }
