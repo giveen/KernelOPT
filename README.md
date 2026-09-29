@@ -112,10 +112,17 @@ kernelopt run-ninfer --op add_bias --edit-mode patch --watch
 ### Whole-engine (model-level) verification
 
 ```bash
+# What local models can I test against? (searches <repo>/models, KERNELOPT_MODELS_DIR, ~/models)
+kernelopt models
+
 # Gate 3: the candidate must produce the same tokens and not be slower, end to end
-kernelopt run-ninfer --op bf16_linear_add --e2e-weights /path/to/model.ninfer --watch
+kernelopt run-ninfer --op bf16_linear_add --e2e-weights qwen3_8_27b_nvfp4 --watch  # by name
+kernelopt run-ninfer --op bf16_linear_add --e2e-weights auto --watch              # newest local
 kernelopt run-llamacpp --op SOFT_MAX --e2e-weights /path/to/model.gguf --watch
 ```
+
+`--e2e-weights` takes a path, a bare name (from `kernelopt models`), or `auto`;
+it also reads `KERNELOPT_E2E_WEIGHTS` from `.env`.
 
 `--e2e-cmd` / `--profile-cmd` consume the rest of the argv — put them **last**.
 
@@ -140,6 +147,9 @@ kernelopt campaign --mode ninfer --resume 20260929_063819_ninfer --watch
 # What's optimizable here? (one target, or every target)
 kernelopt discover --list
 kernelopt discover --op add_bias
+
+# What local models can I run the engine-E2E against?
+kernelopt models --mode ninfer
 
 # Rank kernels by real engine share (Graphsignal; attribution only)
 kernelopt profile --mode llamacpp --cuda-graph-trace node \

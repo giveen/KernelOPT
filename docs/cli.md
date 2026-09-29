@@ -318,9 +318,10 @@ Provision Graphsignal into KernelOPT's managed venv (no separate install).
 
 | Command | Options | Meaning |
 |---|---|---|
-| `providers` | `--provider`, `--model`, `--base-url`, `--api-key`, `--no-ping` | List presets and probe auth/models (skip the completion probe with `--no-ping`). |
+| `providers` | `--provider`, `--model`, `--base-url`, `--api-key`, `--no-ping` | List presets and probe auth/models + a forced **tool call** (skip the probes with `--no-ping`). |
+| `models` | `--mode`, `--repo`, `--json` | List local model artifacts usable for the engine-E2E (Gate 3) check; `--e2e-weights` then accepts a bare name or `auto`. |
 | `status <RUN_ID>` | `--campaign` | Replay a run's journal (events, passing candidates, tokens); with `--campaign` summarize a campaign's target queue. |
-| `watch [RUN_ID]` | `--latest`, `--once` | Tail a run's journal live (progress monitor); omit the id or pass `--latest` for the most recent run; `--once` prints and exits. |
+| `watch [RUN_ID]` | `--latest`, `--once`, `--follow` | Tail a run's journal live; stops on finish and prints the artifact paths, `--follow` keeps tailing, `--once` prints and exits. |
 | `history <RUN_ID>` | — | List a run's candidate commits (sha, status, latency, plan). |
 | `revert <RUN_ID>` | `--to <sha\|tag>` | Reset the run's worktree to a candidate commit. |
 | `analyze <RUN_ID>` | `--json` | Diagnose a run: failure taxonomy (compile/correctness/bench/no-tool-call), retries, token spend by agent, plan diversity, and the winner summary. |

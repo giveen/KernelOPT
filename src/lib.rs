@@ -12,6 +12,7 @@ pub mod journal;
 pub mod llamacpp;
 pub mod llm;
 pub mod memory;
+pub mod models;
 pub mod ninfer;
 pub mod pipeline;
 pub mod prompts;

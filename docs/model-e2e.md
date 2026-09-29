@@ -46,6 +46,30 @@ compares its stdout digest + wall time.
 Perplexity (`engine_perplexity`) is implemented for `ninfer`
 (`ninfer-perplexity --corpus|--text`) and `llamacpp` (`llama-perplexity -f`).
 
+## Choosing a model
+
+`--e2e-weights` accepts a path, a bare **name**, or `auto` (env fallback
+`KERNELOPT_E2E_WEIGHTS`). List what's on the machine:
+
+```bash
+kernelopt models                 # every engine
+kernelopt models --mode ninfer   # just .ninfer artifacts
+kernelopt models --json          # machine-readable
+```
+
+It searches `KERNELOPT_MODELS_DIR` (colon-separated), `<repo>/models`,
+`./models`, and `~/models`, newest first. Then either form works:
+
+```bash
+kernelopt run-ninfer --op fp8_linear_add --e2e-weights qwen3_8_27b_nvfp4
+kernelopt run-ninfer --op fp8_linear_add --e2e-weights auto
+```
+
+The model must actually **run the kernel you optimized**, or the comparison is
+vacuous — the digest matches trivially and the wall-time says nothing about the
+kernel. Match the engine too: ninfer takes `.ninfer`, llama.cpp takes `.gguf`,
+vLLM/SGLang/HF take safetensors.
+
 ## Usage
 
 ```bash

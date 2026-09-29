@@ -409,6 +409,18 @@ enum Cmd {
         #[arg(long)]
         no_ping: bool,
     },
+    /// List local models usable for the engine-E2E (Gate 3) check.
+    Models {
+        /// Filter by backend engine (ninfer|llamacpp|hf).
+        #[arg(long)]
+        mode: Option<String>,
+        /// Repo whose `models/` dir is searched (env: NINFER_REPO/LLAMACPP_REPO).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Emit JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(clap::Args, Clone)]
@@ -476,6 +488,42 @@ fn resolve_llm(
         api_key: api_key.or_else(|| env_opt("KERNELOPT_API_KEY")),
         reasoning_effort: reasoning_effort.or_else(|| env_opt("KERNELOPT_REASONING_EFFORT")),
     }
+}
+
+/// Build the engine-E2E (Gate 3) config. Enabled by `--e2e-weights` **or**
+/// `--e2e-cmd`. `--e2e-weights` also reads `KERNELOPT_E2E_WEIGHTS`, and accepts
+/// `auto` or a bare local-model name (see `kernelopt models`).
+#[allow(clippy::too_many_arguments)]
+fn build_e2e(
+    weights: Option<String>,
+    engine: Option<String>,
+    cmd: Vec<String>,
+    prompt: String,
+    max_new: u32,
+    repo: &std::path::Path,
+    backend: Backend,
+) -> Result<Option<E2eConfig>> {
+    let has_cmd = !cmd.is_empty();
+    let weights = weights.or_else(|| env_opt("KERNELOPT_E2E_WEIGHTS"));
+    if weights.is_none() && !has_cmd {
+        return Ok(None);
+    }
+    let model = match weights {
+        // A custom command carries its own model path; keep the spec verbatim.
+        Some(spec) if has_cmd => kernelopt::dotenv::expand_tilde(&spec),
+        Some(spec) => kernelopt::models::resolve(&spec, repo, Some(backend.as_str()))?
+            .to_string_lossy()
+            .to_string(),
+        None => String::new(),
+    };
+    Ok(Some(E2eConfig {
+        model,
+        engine,
+        cmd: has_cmd.then_some(cmd),
+        prompt,
+        max_new,
+        seed: 0,
+    }))
 }
 
 #[derive(clap::Args, Clone)]
@@ -580,19 +628,13 @@ fn main() -> Result<()> {
             let client = build_llm(&cfg);
             let runner = RunnerBridge::new(cfg.runner_dir.clone());
             let session_id = run_id.unwrap_or_else(|| format!("{}_{}_ninfer", chrono::Utc::now().format("%Y%m%d_%H%M%S"), cfg.provider));
+            let e2e = build_e2e(e2e_weights, e2e_engine, e2e_cmd, e2e_prompt, e2e_max_new, &repo, backend)?;
             let result = run_single(&cfg, client.as_ref(), &runner, target, SingleRunOpts {
                 repo,
                 session_id: session_id.clone(),
                 backend,
                 ncu_set: cfg.ncu_set.clone(),
-                e2e: e2e_weights.map(|p| E2eConfig {
-                    model: kernelopt::dotenv::expand_tilde(&p),
-                    engine: e2e_engine,
-                    cmd: (!e2e_cmd.is_empty()).then_some(e2e_cmd),
-                    prompt: e2e_prompt,
-                    max_new: e2e_max_new,
-                    seed: 0,
-                }),
+                e2e,
                 kernel_file,
                 bench_args,
                 build_dir: build_dir.map(|p| PathBuf::from(kernelopt::dotenv::expand_tilde(&p))),
@@ -622,19 +664,13 @@ fn main() -> Result<()> {
             let client = build_llm(&cfg);
             let runner = RunnerBridge::new(cfg.runner_dir.clone());
             let session_id = run_id.unwrap_or_else(|| format!("{}_{}_llamacpp", chrono::Utc::now().format("%Y%m%d_%H%M%S"), cfg.provider));
+            let e2e = build_e2e(e2e_weights, e2e_engine, e2e_cmd, e2e_prompt, e2e_max_new, &repo, backend)?;
             let result = run_single(&cfg, client.as_ref(), &runner, target, SingleRunOpts {
                 repo,
                 session_id: session_id.clone(),
                 backend,
                 ncu_set: cfg.ncu_set.clone(),
-                e2e: e2e_weights.map(|p| E2eConfig {
-                    model: kernelopt::dotenv::expand_tilde(&p),
-                    engine: e2e_engine,
-                    cmd: (!e2e_cmd.is_empty()).then_some(e2e_cmd),
-                    prompt: e2e_prompt,
-                    max_new: e2e_max_new,
-                    seed: 0,
-                }),
+                e2e,
                 kernel_file,
                 bench_args,
                 build_dir: build_dir.map(|p| PathBuf::from(kernelopt::dotenv::expand_tilde(&p))),
@@ -697,6 +733,15 @@ fn main() -> Result<()> {
             let campaign_id = resume.clone().unwrap_or_else(|| {
                 format!("{}_{}", chrono::Utc::now().format("%Y%m%d_%H%M%S"), backend.as_str())
             });
+            let e2e = build_e2e(
+                e2e_weights,
+                e2e_engine,
+                e2e_cmd,
+                "The capital of France is".into(),
+                16,
+                &repo,
+                backend,
+            )?;
             let opts = CampaignOptions {
                 repo,
                 backend,
@@ -713,14 +758,7 @@ fn main() -> Result<()> {
                 },
                 llm_call_budget: if budget_llm_calls > 0 { Some(budget_llm_calls) } else { None },
                 ncu_set: cfg.ncu_set.clone(),
-                e2e: e2e_weights.map(|p| E2eConfig {
-                    model: kernelopt::dotenv::expand_tilde(&p),
-                    engine: e2e_engine,
-                    cmd: (!e2e_cmd.is_empty()).then_some(e2e_cmd),
-                    prompt: "The capital of France is".into(),
-                    max_new: 16,
-                    seed: 0,
-                }),
+                e2e,
                 order,
                 profile_cmd,
                 profile_port,
@@ -1010,6 +1048,8 @@ fn main() -> Result<()> {
         Cmd::Providers { provider, model, base_url, api_key, no_ping } => {
             providers(provider, model, base_url, api_key, no_ping)
         }
+
+        Cmd::Models { mode, repo, json } => list_models(mode, repo, json),
     }
 }
 
@@ -1285,6 +1325,55 @@ fn providers(
             Err(e) => println!("FAILED: {e:#}"),
         }
     }
+    Ok(())
+}
+
+/// List local model artifacts usable for the engine-E2E (Gate 3) check.
+fn list_models(mode: Option<String>, repo: Option<String>, json: bool) -> Result<()> {
+    let repo = repo
+        .map(|p| kernelopt::dotenv::expand_tilde(&p))
+        .or_else(|| env_opt("NINFER_REPO").map(|p| kernelopt::dotenv::expand_tilde(&p)))
+        .or_else(|| env_opt("LLAMACPP_REPO").map(|p| kernelopt::dotenv::expand_tilde(&p)))
+        .unwrap_or_else(|| ".".to_string());
+    let repo = std::path::PathBuf::from(repo);
+    let backend = mode.as_deref().filter(|m| *m != "auto");
+    let models = kernelopt::models::discover(&repo, backend);
+
+    if json {
+        let arr: Vec<serde_json::Value> = models
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "name": m.name, "engine": m.engine, "size_bytes": m.size_bytes,
+                    "path": m.path.to_string_lossy(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&arr)?);
+        return Ok(());
+    }
+
+    println!("search dirs (KERNELOPT_MODELS_DIR, <repo>/models, ./models, ~/models):");
+    for d in kernelopt::models::search_dirs(&repo) {
+        println!("  {}", d.display());
+    }
+    if models.is_empty() {
+        println!(
+            "\nno local models found — set KERNELOPT_MODELS_DIR, or place artifacts under <repo>/models"
+        );
+        return Ok(());
+    }
+    println!("\n{:<46} {:<9} {:>10}  path", "name", "engine", "size");
+    for m in &models {
+        println!(
+            "{:<46} {:<9} {:>10}  {}",
+            m.name,
+            m.engine,
+            kernelopt::models::human_size(m.size_bytes),
+            m.path.display()
+        );
+    }
+    println!("\nuse one with `--e2e-weights <name|auto>` — a bare name resolves to the path above.");
     Ok(())
 }
 
