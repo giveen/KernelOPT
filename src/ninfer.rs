@@ -799,6 +799,10 @@ pub fn to_target(inv: &OpInventory) -> crate::backend::Target {
         bench_args: Vec::new(),
         timing: !inv.benches.is_empty(),
         warnings: inv.warnings.clone(),
+        configure_args: crate::backend::ninfer_configure_args(),
+        test_cmd: None,
+        bench_cmd: None,
+        bench_format: None,
     }
 }
 

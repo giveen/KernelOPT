@@ -699,6 +699,24 @@ pub fn verify_view(resp: &Value, backend: crate::backend::Backend) -> Value {
                 "failing_cases": failing,
             })
         }
+        crate::backend::Backend::Custom => {
+            // A custom test command's contract is simply "exit 0 == correct".
+            // Best-effort: surface obvious FAIL lines.
+            let failing: Vec<Value> = text
+                .lines()
+                .filter(|l| {
+                    let u = l.to_uppercase();
+                    u.contains("FAIL") || u.contains("MISMATCH")
+                })
+                .take(20)
+                .map(|l| json!({"name": l.trim().chars().take(220).collect::<String>()}))
+                .collect();
+            json!({
+                "passed": ran_clean && failing.is_empty(),
+                "exit_code": exit,
+                "failing_cases": failing,
+            })
+        }
     }
 }
 

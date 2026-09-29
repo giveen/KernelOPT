@@ -295,6 +295,7 @@ impl<'a> CudaPipeline<'a> {
             let engines: &[&str] = match self.target.backend {
                 Backend::Ninfer => &["ninfer", "ninfer-perplexity", "ninfer_bench"],
                 Backend::Llamacpp => &["llama-cli", "llama-perplexity", "llama-bench"],
+                Backend::Custom => &[],
             };
             for b in engines {
                 if !t.iter().any(|x| x == b) {
@@ -352,7 +353,7 @@ impl<'a> CudaPipeline<'a> {
             &self.compile_targets(),
             true,
             true,
-            &self.target.backend.configure_args(),
+            &self.target.configure_args,
             num_cpus(),
             3600,
         )
@@ -449,6 +450,26 @@ impl<'a> CudaPipeline<'a> {
                         1800,
                     )?
                 }
+                Backend::Custom => {
+                    let bc = self
+                        .target
+                        .bench_cmd
+                        .as_ref()
+                        .context("custom target has no `bench_cmd` in kernelopt.toml")?;
+                    let mut runs = Vec::new();
+                    let mut last = None;
+                    for _ in 0..3 {
+                        let argv =
+                            crate::custom::expand(bc, &self.repo, &self.build_dir, Some(&csv));
+                        let r = crate::exec::run_argv(&argv, 1800)?;
+                        last = r["exit_code"].as_i64();
+                        let csv_text = std::fs::read_to_string(&csv)
+                            .ok()
+                            .filter(|s| !s.trim().is_empty());
+                        runs.push(json!({"stdout": r["raw_stdout"], "csv": csv_text}));
+                    }
+                    json!({"ok": true, "exit_code": last, "runs": runs})
+                }
             }
         };
         // Parse + aggregate in Rust (representative shape, noise, bandwidth).
@@ -456,13 +477,19 @@ impl<'a> CudaPipeline<'a> {
             .as_array()
             .map(|runs| {
                 runs.iter()
-                    .map(|r| match self.target.backend {
-                        Backend::Ninfer => crate::parse::parse_bench_ninfer(
-                            r["stdout"].as_str().unwrap_or(""),
-                            r["csv"].as_str(),
-                        ),
-                        Backend::Llamacpp => {
-                            crate::parse::parse_bench_llama(r["stdout"].as_str().unwrap_or(""))
+                    .map(|r| {
+                        let stdout = r["stdout"].as_str().unwrap_or("");
+                        let csv = r["csv"].as_str();
+                        match self.target.bench_format.as_deref() {
+                            Some("llama") => crate::parse::parse_bench_llama(stdout),
+                            Some("csv") => {
+                                crate::parse::parse_bench_csv(csv.unwrap_or(stdout))
+                            }
+                            Some("stdout") => crate::parse::parse_bench_stdout(stdout),
+                            _ => match self.target.backend {
+                                Backend::Llamacpp => crate::parse::parse_bench_llama(stdout),
+                                _ => crate::parse::parse_bench_ninfer(stdout, csv),
+                            },
                         }
                     })
                     .collect()
@@ -516,6 +543,15 @@ impl<'a> CudaPipeline<'a> {
                     v.push(self.target.test_filters.join(","));
                 }
                 (v, 3u32)
+            }
+            Backend::Custom => {
+                let Some(bc) = &self.target.bench_cmd else {
+                    return self.note_profile("custom target has no `bench_cmd` to profile");
+                };
+                (
+                    crate::custom::expand(bc, &self.repo, &self.build_dir, None),
+                    5u32,
+                )
             }
         };
         let resp = {
@@ -1807,13 +1843,21 @@ impl<'a> CudaPipeline<'a> {
 
     fn verify_now(&self) -> Result<serde_json::Value> {
         let _guard = crate::gpu_lock::lock(&self.gpu_lock_path)?;
-        let resp = match self.target.backend {
-            Backend::Ninfer => {
-                crate::exec::ctest(&self.build_dir, &self.target.test_filters, 1800)?
-            }
-            Backend::Llamacpp => {
-                let bin = self.build_dir.join("bin").join("test-backend-ops");
-                crate::exec::llama_test(&bin, "CUDA0", &self.target.test_filters, 1800)?
+        let resp = if let Some(tc) = &self.target.test_cmd {
+            let argv = crate::custom::expand(tc, &self.repo, &self.build_dir, None);
+            crate::exec::run_argv(&argv, 1800)?
+        } else {
+            match self.target.backend {
+                Backend::Ninfer => {
+                    crate::exec::ctest(&self.build_dir, &self.target.test_filters, 1800)?
+                }
+                Backend::Llamacpp => {
+                    let bin = self.build_dir.join("bin").join("test-backend-ops");
+                    crate::exec::llama_test(&bin, "CUDA0", &self.target.test_filters, 1800)?
+                }
+                Backend::Custom => {
+                    anyhow::bail!("custom target has no `test_cmd` in kernelopt.toml")
+                }
             }
         };
         Ok(crate::parse::verify_view(&resp, self.target.backend))

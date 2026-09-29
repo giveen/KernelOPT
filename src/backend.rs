@@ -17,6 +17,8 @@ pub enum Backend {
     Ninfer,
     /// llama.cpp: CMake + `test-backend-ops test|perf`.
     Llamacpp,
+    /// Any CUDA repo: gates declared in `kernelopt.toml`.
+    Custom,
 }
 
 impl Backend {
@@ -24,6 +26,7 @@ impl Backend {
         match self {
             Backend::Ninfer => "ninfer",
             Backend::Llamacpp => "llamacpp",
+            Backend::Custom => "custom",
         }
     }
 
@@ -31,13 +34,16 @@ impl Backend {
         match s.to_ascii_lowercase().as_str() {
             "ninfer" => Ok(Backend::Ninfer),
             "llamacpp" | "llama.cpp" | "llama" => Ok(Backend::Llamacpp),
-            other => anyhow::bail!("unknown backend {other:?} (use ninfer|llamacpp|auto)"),
+            "custom" | "generic" | "cuda" => Ok(Backend::Custom),
+            other => anyhow::bail!("unknown backend {other:?} (use ninfer|llamacpp|custom|auto)"),
         }
     }
 
     /// Detect the backend from repo markers.
     pub fn detect(repo: &Path) -> Option<Backend> {
-        if repo.join("src/ops").is_dir() && repo.join("include/ninfer/ops").is_dir() {
+        if repo.join("kernelopt.toml").is_file() {
+            Some(Backend::Custom)
+        } else if repo.join("src/ops").is_dir() && repo.join("include/ninfer/ops").is_dir() {
             Some(Backend::Ninfer)
         } else if repo.join("ggml/src/ggml-cuda").is_dir() {
             Some(Backend::Llamacpp)
@@ -98,6 +104,19 @@ pub struct Target {
     pub timing: bool,
     /// Non-fatal problems worth surfacing.
     pub warnings: Vec<String>,
+    /// CMake configure flags for this target's project (custom backends set
+    /// their own; built-ins default to `Backend::configure_args`).
+    #[serde(default)]
+    pub configure_args: Vec<String>,
+    /// Explicit Gate-2 command (custom). `{repo}`/`{build}` are substituted.
+    #[serde(default)]
+    pub test_cmd: Option<Vec<String>>,
+    /// Explicit Gate-4 command (custom). `{repo}`/`{build}`/`{csv}` substituted.
+    #[serde(default)]
+    pub bench_cmd: Option<Vec<String>>,
+    /// Bench output format for custom targets: `csv` | `stdout` | `llama`.
+    #[serde(default)]
+    pub bench_format: Option<String>,
 }
 
 impl Target {
@@ -112,6 +131,7 @@ pub fn discover_targets(repo: &Path, backend: Backend) -> Result<Vec<Target>> {
     let mut targets = match backend {
         Backend::Ninfer => crate::ninfer::discover_targets(repo)?,
         Backend::Llamacpp => crate::llamacpp::discover_targets(repo)?,
+        Backend::Custom => crate::custom::discover_targets(repo)?,
     };
     targets.sort_by(|a, b| {
         a.complexity()
@@ -126,6 +146,7 @@ pub fn discover_target(repo: &Path, backend: Backend, op: &str) -> Result<Target
     match backend {
         Backend::Ninfer => crate::ninfer::discover_target(repo, op),
         Backend::Llamacpp => crate::llamacpp::discover_target(repo, op),
+        Backend::Custom => crate::custom::discover_target(repo, op),
     }
 }
 
@@ -153,6 +174,8 @@ impl Backend {
         match self {
             Backend::Ninfer => ninfer_configure_args(),
             Backend::Llamacpp => llamacpp_configure_args(),
+            // Custom projects declare their own in `kernelopt.toml`.
+            Backend::Custom => vec!["-DCMAKE_BUILD_TYPE=Release".into()],
         }
     }
 }

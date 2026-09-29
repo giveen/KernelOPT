@@ -15,6 +15,7 @@ Optimization* (arXiv:2609.30059), extended to CUDA kernel trees.
 | `triton` | compiled PyTorch model | one Inductor `@triton.jit` kernel | eager PyTorch + `allclose` | `triton.testing.do_bench` |
 | `ninfer` | ninfer checkout | one `src/ops/<family>/<impl>/*.cu` | the Op's own `ctest` suite | `ninfer_<op>_bench` |
 | `llamacpp` | llama.cpp checkout | one `ggml/src/ggml-cuda/*.cu` | `test-backend-ops test -o <OP>` | `test-backend-ops perf -o <OP>` |
+| `custom` | any CUDA repo with `kernelopt.toml` | a file you declare | your `test_cmd` | your `bench_cmd` |
 
 ## How it works
 
@@ -141,6 +142,18 @@ it also reads `KERNELOPT_E2E_WEIGHTS` from `.env`.
 
 `--e2e-cmd` / `--profile-cmd` consume the rest of the argv — put them **last**.
 
+### Your own inference engine (custom)
+
+```bash
+# Declare build/test/bench in <repo>/kernelopt.toml, then:
+kernelopt wizard --repo /path/to/my-engine            # auto-detects kernelopt.toml
+kernelopt campaign --repo /path/to/my-engine --mode custom --op add_bias \
+    --max-targets 1 --max-iterations 3 --watch
+```
+
+See [docs/custom-mode.md](docs/custom-mode.md) — the full engine (LLM loop,
+measurement rigor, gates) applies to any CUDA repo, no code changes.
+
 ### Sweep a directory (campaign)
 
 ```bash
@@ -206,6 +219,7 @@ thinking level. See `.env.example` for all keys.
 | [docs/model-e2e.md](docs/model-e2e.md) | Model-level (engine) verification: same tokens, not slower |
 | [docs/ninfer-mode.md](docs/ninfer-mode.md) | ninfer mapping (gates, workbench, prompts) |
 | [docs/llamacpp-mode.md](docs/llamacpp-mode.md) | llama.cpp mapping (`test-backend-ops` gates) |
+| [docs/custom-mode.md](docs/custom-mode.md) | **custom mode**: optimize any CUDA repo via `kernelopt.toml` |
 | [docs/graphsignal.md](docs/graphsignal.md) | Engine-share profiling, managed install, attribution rules |
 
 ## Outputs

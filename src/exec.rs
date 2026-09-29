@@ -292,6 +292,23 @@ pub fn ncu(
     }))
 }
 
+/// Run an arbitrary argv (custom-backend test/bench commands), capturing output.
+pub fn run_argv(argv: &[String], timeout_secs: u64) -> Result<Value> {
+    let Some(prog) = argv.first() else {
+        bail!("empty command");
+    };
+    let mut cmd = Command::new(prog);
+    cmd.args(&argv[1..]);
+    let o = run_capture(&mut cmd, timeout_secs)?;
+    if o.timed_out {
+        bail!("command timed out after {timeout_secs}s: {}", argv.join(" "));
+    }
+    Ok(json!({
+        "ok": true, "passed": o.code == Some(0), "exit_code": o.code,
+        "raw_stdout": o.stdout, "raw_stderr": o.stderr,
+    }))
+}
+
 /// Discover the `nsys` binary (PATH, then CUDA_HOME/CUDA_PATH).
 pub fn find_nsys() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("PATH") {

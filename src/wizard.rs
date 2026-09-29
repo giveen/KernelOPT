@@ -44,7 +44,8 @@ impl Plan {
     /// The equivalent `kernelopt …` argv (the wizard runs exactly this).
     pub fn argv(&self) -> Vec<String> {
         let mut a: Vec<String> = Vec::new();
-        if self.all {
+        // Custom projects have no single-target subcommand; use campaign.
+        if self.all || self.backend == Backend::Custom {
             a.push("campaign".into());
             a.push("--mode".into());
             a.push(self.backend.as_str().into());
@@ -59,6 +60,7 @@ impl Plan {
                 match self.backend {
                     Backend::Ninfer => "run-ninfer",
                     Backend::Llamacpp => "run-llamacpp",
+                    Backend::Custom => "campaign", // unreachable (handled above)
                 }
                 .into(),
             );

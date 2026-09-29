@@ -119,6 +119,10 @@ mod tests {
             bench_args: vec![],
             timing: true,
             warnings: vec![],
+            configure_args: vec![],
+            test_cmd: None,
+            bench_cmd: None,
+            bench_format: None,
         }
     }
 

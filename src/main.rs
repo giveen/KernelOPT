@@ -1497,16 +1497,20 @@ fn wizard(
     // Optionally persist the choices so later plain runs pick them up.
     if save {
         let repo_key = match backend {
-            Backend::Ninfer => "NINFER_REPO",
-            Backend::Llamacpp => "LLAMACPP_REPO",
+            Backend::Ninfer => Some("NINFER_REPO"),
+            Backend::Llamacpp => Some("LLAMACPP_REPO"),
+            // Custom repos are passed with --repo (no canonical env var).
+            Backend::Custom => None,
         };
         let mut pairs: Vec<(String, String)> = vec![
-            (repo_key.into(), repo.to_string_lossy().to_string()),
             ("KERNELOPT_PROVIDER".into(), provider.clone()),
             ("KERNELOPT_MODEL".into(), model.clone()),
             ("KERNELOPT_ITERATIONS".into(), iterations.to_string()),
             ("KERNELOPT_BEAM".into(), beam.to_string()),
         ];
+        if let Some(k) = repo_key {
+            pairs.insert(0, (k.into(), repo.to_string_lossy().to_string()));
+        }
         if let Some(e) = &e2e {
             pairs.push(("KERNELOPT_E2E_WEIGHTS".into(), e.clone()));
         }

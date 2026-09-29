@@ -6,6 +6,7 @@ pub mod backend;
 pub mod campaign;
 pub mod config;
 pub mod cuda_pipeline;
+pub mod custom;
 pub mod dotenv;
 pub mod engine_share;
 pub mod exec;
