@@ -269,6 +269,94 @@ pub fn parse_compiler_errors(text: &str) -> Vec<Value> {
     out
 }
 
+/// nsys `cuda_gpu_kern_sum` / `cuda_gpu_mem_time_sum` CSV → `(name, total ns)`.
+/// `nsys stats` prints progress lines before the CSV, so find the header row.
+pub fn parse_nsys_sum(csv: &str) -> Vec<(String, f64)> {
+    let all: Vec<&str> = csv.lines().filter(|l| !l.trim().is_empty()).collect();
+    let name_of = |cols: &[String]| {
+        cols.iter().position(|c| {
+            let l = c.to_lowercase();
+            l.contains("kernel name") || l.contains("operation") || l == "name"
+        })
+    };
+    let total_of = |cols: &[String]| {
+        cols.iter()
+            .position(|c| c.to_lowercase().contains("total time"))
+    };
+    let Some(hi) = all.iter().position(|line| {
+        let cols = csv_split(line);
+        name_of(&cols).is_some() && total_of(&cols).is_some()
+    }) else {
+        return Vec::new();
+    };
+    let cols = csv_split(all[hi]);
+    let (Some(nc), Some(tc)) = (name_of(&cols), total_of(&cols)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in &all[hi + 1..] {
+        let f = csv_split(line);
+        let name = f.get(nc).map(|s| s.trim().to_string()).unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        let ns = f
+            .get(tc)
+            .map(|v| v.replace(',', "").trim().parse::<f64>().unwrap_or(0.0))
+            .unwrap_or(0.0);
+        if ns > 0.0 {
+            out.push((name, ns));
+        }
+    }
+    out
+}
+
+/// ncu CSV → `(kernel, cumulative ns)` by summing every `Duration` row.
+pub fn ncu_kernel_times(csv_text: &str) -> Vec<(String, f64)> {
+    let mut lines = csv_text.lines().filter(|l| !l.trim().is_empty());
+    let Some(header) = lines.next() else {
+        return Vec::new();
+    };
+    let cols = csv_split(header);
+    let col = |n: &str| cols.iter().position(|h| h == n);
+    let (Some(ik), Some(im), Some(iv)) = (
+        col("Kernel Name").or_else(|| col("Kernel Name (correlation ID)")),
+        col("Metric Name"),
+        col("Metric Value"),
+    ) else {
+        return Vec::new();
+    };
+    let iu = col("Metric Unit");
+    let mut order: Vec<String> = Vec::new();
+    let mut agg: HashMap<String, f64> = HashMap::new();
+    for line in lines {
+        let f = csv_split(line);
+        let g = |i: usize| {
+            f.get(i)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default()
+        };
+        if g(im) != "Duration" {
+            continue;
+        }
+        let ns = match iu.map(g).unwrap_or_default().as_str() {
+            "ns" => to_float(&g(iv)),
+            "us" | "µs" => to_float(&g(iv)) * 1000.0,
+            "ms" => to_float(&g(iv)) * 1e6,
+            _ => to_float(&g(iv)) * 1000.0,
+        };
+        let name = g(ik);
+        if name.is_empty() {
+            continue;
+        }
+        if !agg.contains_key(&name) {
+            order.push(name.clone());
+        }
+        *agg.entry(name).or_insert(0.0) += ns;
+    }
+    order.into_iter().map(|n| (n.clone(), agg[&n])).collect()
+}
+
 /// `git diff --numstat` → `{files_changed, file_count, insertions, deletions}`.
 pub fn parse_numstat(text: &str) -> Value {
     let (mut files, mut ins, mut del) = (0u64, 0u64, 0u64);
@@ -725,5 +813,35 @@ add_bias [4608,16384]            median=  181.08 us  min=  179.70 us  p95=  182.
         assert_eq!(p.rows.len(), 1);
         assert_eq!(p.rows[0].median_us, 12.34);
         assert_eq!(p.rows[0].effective_gbs, Some(100.5));
+    }
+
+    #[test]
+    fn nsys_kern_sum_parses_total_ns() {
+        let csv = "\
+Generating SQLite file /tmp/x.sqlite from /tmp/x.nsys-rep
+Processing [/tmp/x.sqlite] with [cuda_gpu_kern_sum.py]...
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+42.3,1234567,10,123456.7,120000,100000,200000,1000,\"void add_bias_kernel(int)\"
+57.7,1686000,3,562000,560000,550000,580000,1000,\"void gemm_kernel(float)\"
+";
+        let v = parse_nsys_sum(csv);
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert_eq!(v[0].0, "void add_bias_kernel(int)");
+        assert_eq!(v[0].1, 1234567.0);
+        assert_eq!(v[1].1, 1686000.0);
+    }
+
+    #[test]
+    fn ncu_kernel_times_sums_launches() {
+        let csv = "\
+\"ID\",\"Kernel Name\",\"Metric Name\",\"Metric Unit\",\"Metric Value\"
+\"0\",\"void k<float>\",\"Duration\",\"us\",\"10.0\"
+\"1\",\"void k<float>\",\"Duration\",\"us\",\"12.0\"
+\"2\",\"void k<float>\",\"Memory Throughput\",\"%\",\"50.0\"
+";
+        let v = ncu_kernel_times(csv);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].0, "void k<float>");
+        assert!((v[0].1 - 22000.0).abs() < 1.0, "{v:?}"); // 22 us -> ns
     }
 }

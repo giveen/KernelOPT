@@ -267,7 +267,7 @@ enum Cmd {
         #[command(flatten)]
         loop_: LoopArgs,
     },
-    /// Rank kernels by real engine share using Graphsignal (attribution only).
+    /// Rank kernels by real engine share (nsys/ncu, or Graphsignal).
     Profile {
         /// Target checkout (env: NINFER_REPO/LLAMACPP_REPO).
         #[arg(long)]
@@ -275,7 +275,7 @@ enum Cmd {
         /// Backend: auto | ninfer | llamacpp.
         #[arg(long, default_value = "auto")]
         mode: String,
-        /// Workload to run under `graphsignal-run` (argv after --cmd).
+        /// Workload to profile (argv after --cmd; place last).
         #[arg(long = "cmd", required = true, num_args = 1.., allow_hyphen_values = true)]
         cmd: Vec<String>,
         #[arg(long, default_value_t = 18259)]
@@ -295,6 +295,9 @@ enum Cmd {
         /// Auto-provision install source (path, git URL, or "pypi").
         #[arg(long)]
         source: Option<String>,
+        /// Engine-share backend: auto | nsys | ncu | graphsignal.
+        #[arg(long, default_value = "auto")]
+        engine: String,
         /// Emit JSON instead of a table.
         #[arg(long)]
         json: bool,
@@ -845,7 +848,7 @@ fn main() -> Result<()> {
             Ok(())
         }
 
-        Cmd::Profile { repo, mode, cmd, listen_port, cuda_graph_trace, top, cwd, no_setup, source, json } => {
+        Cmd::Profile { repo, mode, cmd, listen_port, cuda_graph_trace, top, cwd, no_setup, source, json, engine } => {
             let envs: &[&str] = match mode.to_ascii_lowercase().as_str() {
                 "llamacpp" | "llama.cpp" | "llama" => &["LLAMACPP_REPO"],
                 "ninfer" => &["NINFER_REPO"],
@@ -854,35 +857,55 @@ fn main() -> Result<()> {
             let repo = resolve_repo(repo, envs, "NINFER_REPO or LLAMACPP_REPO")?;
             let backend = backend::resolve_backend(&repo, Some(&mode))?;
             let targets = backend::discover_targets(&repo, backend)?;
-            let runner = RunnerBridge::new(PathBuf::from("runner"));
-            let managed = std::env::current_dir()?.join(".kernelopt/graphsignal");
-            let resp = runner.call(&serde_json::json!({
-                "command": "graphsignal_profile",
-                "cmd": cmd,
-                "listen_port": listen_port,
-                "cuda_graph_trace": cuda_graph_trace,
-                "cwd": cwd,
-                "auto_setup": !no_setup,
-                "source": source,
-                "managed_dir": managed,
-                "timeout_s": 1800,
-            }))?;
-            if resp["ok"] != serde_json::json!(true) {
-                anyhow::bail!(
-                    "graphsignal_profile failed: {}",
-                    resp["error"]["message"].as_str().unwrap_or("unknown")
-                );
-            }
-            let payload = &resp["signals"];
-            let kernels = signals::kernel_times(payload, top);
+            let engine = if engine.eq_ignore_ascii_case("auto") {
+                kernelopt::engine_share::auto_engine().to_string()
+            } else {
+                engine.to_ascii_lowercase()
+            };
+            eprintln!("[profile] engine share via {engine} (workload: {})", cmd.join(" "));
+            let (kernels, summary) = match engine.as_str() {
+                "nsys" | "ncu" => {
+                    let k = if engine == "nsys" {
+                        kernelopt::engine_share::nsys_kernel_times(&cmd, 1800)?
+                    } else {
+                        kernelopt::engine_share::ncu_kernel_times(&cmd, 1800)?
+                    };
+                    (k, serde_json::json!({}))
+                }
+                _ => {
+                    let runner = RunnerBridge::new(PathBuf::from("runner"));
+                    let managed = std::env::current_dir()?.join(".kernelopt/graphsignal");
+                    let resp = runner.call(&serde_json::json!({
+                        "command": "graphsignal_profile",
+                        "cmd": cmd,
+                        "listen_port": listen_port,
+                        "cuda_graph_trace": cuda_graph_trace,
+                        "cwd": cwd,
+                        "auto_setup": !no_setup,
+                        "source": source,
+                        "managed_dir": managed,
+                        "timeout_s": 1800,
+                    }))?;
+                    if resp["ok"] != serde_json::json!(true) {
+                        anyhow::bail!(
+                            "graphsignal_profile failed: {}",
+                            resp["error"]["message"].as_str().unwrap_or("unknown")
+                        );
+                    }
+                    let payload = resp["signals"].clone();
+                    let k = signals::kernel_times(&payload, top);
+                    let s = signals::summarize(&payload, top);
+                    (k, s)
+                }
+            };
             let (ranking, unattributed) = attribution::rank_targets(&kernels, &targets);
-            let summary = signals::summarize(payload, top);
 
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "backend": backend.as_str(),
+                        "engine": engine,
                         "targets": targets.len(),
                         "kernels": kernels.len(),
                         "ranking": ranking,
@@ -897,8 +920,7 @@ fn main() -> Result<()> {
                 println!("summary: {summary}");
             } else {
                 println!(
-                    "engine share — graphsignal trace={} ({} kernels, {} targets)",
-                    cuda_graph_trace,
+                    "engine share — {engine} ({} kernels, {} targets)",
                     kernels.len(),
                     targets.len()
                 );

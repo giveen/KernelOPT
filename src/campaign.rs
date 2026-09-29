@@ -444,8 +444,14 @@ fn save_campaign_memory(
     Ok(())
 }
 
-/// Run the campaign's workload under Graphsignal and return ranked kernel times.
+/// Rank kernels by GPU time in the campaign's workload. Uses the NVIDIA suite
+/// (nsys → ncu) by default, falling back to Graphsignal when neither is present.
 fn engine_kernel_times(runner: &RunnerBridge, opts: &CampaignOptions) -> Result<Vec<(String, f64)>> {
+    match crate::engine_share::auto_engine() {
+        "nsys" => return crate::engine_share::nsys_kernel_times(&opts.profile_cmd, 1800),
+        "ncu" => return crate::engine_share::ncu_kernel_times(&opts.profile_cmd, 1800),
+        _ => {}
+    }
     let managed = std::env::current_dir()
         .context("cwd")?
         .join(".kernelopt/graphsignal");

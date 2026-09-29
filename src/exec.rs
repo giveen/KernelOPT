@@ -292,7 +292,67 @@ pub fn ncu(
     }))
 }
 
-/// Gate 2 (llama.cpp): `test-backend-ops test`.
+/// Discover the `nsys` binary (PATH, then CUDA_HOME/CUDA_PATH).
+pub fn find_nsys() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(':') {
+            let p = Path::new(dir).join("nsys");
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    for env in ["CUDA_HOME", "CUDA_PATH"] {
+        if let Ok(root) = std::env::var(env) {
+            let p = Path::new(&root).join("bin").join("nsys");
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Trace `workload` with Nsight Systems (CUDA only) into `<out_prefix>.nsys-rep`.
+/// Unlike ncu, nsys needs no admin counters and captures kernels *and* memcpy,
+/// including kernels inside CUDA graphs.
+pub fn nsys_profile(workload: &[String], out_prefix: &Path, timeout_secs: u64) -> Result<Value> {
+    let nsys = find_nsys().context("nsys binary not found")?;
+    let mut cmd = Command::new(&nsys);
+    cmd.arg("profile")
+        .arg("-t")
+        .arg("cuda")
+        .arg("--force-overwrite=true")
+        .arg("-o")
+        .arg(out_prefix)
+        .args(workload);
+    let o = run_capture(&mut cmd, timeout_secs)?;
+    if o.timed_out {
+        bail!("nsys profile timed out after {timeout_secs}s");
+    }
+    Ok(json!({
+        "ok": true, "exit_code": o.code,
+        "raw_stdout": o.stdout, "raw_stderr": o.stderr,
+    }))
+}
+
+/// Run one `nsys stats` report (e.g. `cuda_gpu_kern_sum`) and return its CSV.
+pub fn nsys_stats(rep: &Path, report: &str, timeout_secs: u64) -> Result<String> {
+    let nsys = find_nsys().context("nsys binary not found")?;
+    let mut cmd = Command::new(&nsys);
+    cmd.arg("stats")
+        .arg("--format")
+        .arg("csv")
+        .arg("--report")
+        .arg(report)
+        .arg(rep);
+    let o = run_capture(&mut cmd, timeout_secs)?;
+    if o.timed_out {
+        bail!("nsys stats timed out after {timeout_secs}s");
+    }
+    Ok(o.stdout)
+}
+
 pub fn llama_test(
     binary: &Path,
     backend: &str,
