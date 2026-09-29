@@ -549,10 +549,11 @@ impl<'a> CudaPipeline<'a> {
         // Stable prefix first (target, contract, source/outline, profiling)…
         let mut user = format!(
             "BACKEND: {backend}\nOP: {op}  (family: {family}{variant})\n\
-             TARGET KERNEL FILE: {file}\n\
+             TARGET KERNEL FILE (editable — the ONLY file you may change): {file}\n\
              ALL KERNEL FILES: {files:?}\n\
+             READ-ONLY CONTEXT (launcher/dispatch/wrapper/plan): {context:?}\n\
              CONTRACT HEADER (read-only semantic authority — plan changes to the kernel only):\n{authority}\n\n\
-             {label}:\n{context}\n\n\
+             {label}:\n{context_block}\n\n\
              PROFILING CONTEXT:\n{ctx}\n",
             backend = self.target.backend.as_str(),
             op = self.target.op,
@@ -560,9 +561,10 @@ impl<'a> CudaPipeline<'a> {
             variant = self.target.variant.as_deref().map(|v| format!(" / {v}")).unwrap_or_default(),
             file = self.target.target_file,
             files = self.target.kernel_files,
+            context = self.target.context_files,
             authority = self.authority_block(),
             label = context_label,
-            context = context,
+            context_block = context,
             ctx = ctx_str,
         );
         // …variable context last, so it does not break prefix caching.

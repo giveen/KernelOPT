@@ -684,7 +684,9 @@ def cuda_ncu(request: dict) -> dict:
         cmd.append(f"--kernel-name={request['kernel_name']}")
     caps = bench_capabilities(binary_path) if request.get("probe", True) else set()
     argv = [binary_path, *args]
-    if "--profile" in caps and request.get("profile", True):
+    # Only add --profile when explicitly requested: some benches require
+    # `--profile` to come with a single T and route, so auto-adding it fails.
+    if request.get("profile") and "--profile" in caps:
         argv.append("--profile")
     cmd += argv
 
