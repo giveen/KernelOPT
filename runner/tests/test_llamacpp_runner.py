@@ -85,7 +85,8 @@ def test_llama_verify_soft_max_real():
     )
     assert resp["ok"] is True, resp
     assert resp["passed"] is True, resp
-    assert resp["tests_passed"] == resp["tests_total"] > 0
+    # Parsing lives in Rust now; the runner returns the raw test output.
+    assert "tests passed" in resp["raw_stdout"]
 
 
 @needs_build
@@ -94,5 +95,6 @@ def test_llama_bench_soft_max_real():
         {"command": "llama_bench", "build_dir": LLAMACPP_BUILD, "ops": ["SOFT_MAX"]}
     )
     assert resp["ok"] is True, resp
-    assert resp["median_us"] and resp["median_us"] > 0
-    assert resp["row_count"] >= 1
+    assert resp["runs"], resp
+    parsed = llamacpp.parse_bench_stdout(resp["runs"][0]["stdout"])
+    assert parsed["rows"], resp

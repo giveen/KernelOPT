@@ -133,36 +133,18 @@ def llama_bench(request: dict) -> dict:
     try:
         for _ in range(repeats):
             proc = _run(cmd, None, timeout)
-            parsed = parse_bench_stdout(proc.stdout or "")
-            if parsed["rows"]:
-                runs.append(parsed)
+            runs.append({"stdout": proc.stdout or "", "csv": None})
     except Exception as exc:
         return _err("timeout", f"llama_bench failed: {exc}")
 
-    stdout = (proc.stdout if proc else "") or ""
-    if not runs:
-        return {
-            "ok": True,
-            "passed": False,
-            "error_kind": "no_measurements",
-            "exit_code": proc.returncode if proc else None,
-            "command": " ".join(cmd),
-            "stdout_tail": stdout[-3000:],
-            "rows": [],
-            "median_us": None,
-            "representative_us": None,
-            "noise_pct": None,
-            "row_count": 0,
-        }
-    merged = _merge_bench_runs(runs, request.get("shape_filter"))
+    # Parsing + aggregation live in Rust now.
     return {
         "ok": True,
-        "passed": proc.returncode == 0 and merged["representative_us"] is not None,
+        "passed": proc.returncode == 0,
         "exit_code": proc.returncode,
         "command": " ".join(cmd),
         "repeats": repeats,
-        "stdout_tail": stdout[-1500:],
-        **merged,
+        "runs": runs,
     }
 
 

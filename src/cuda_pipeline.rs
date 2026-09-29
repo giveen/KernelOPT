@@ -487,19 +487,43 @@ impl<'a> CudaPipeline<'a> {
             .join("bench")
             .join(format!("{}.csv", uuid::Uuid::new_v4().simple()));
         let resp = self.gpu_call_timeout(self.bench_command(), self.bench_request(&csv), 1800)?;
-        if resp["ok"] != json!(true) || resp["passed"] != json!(true) {
+        if resp["ok"] != json!(true) {
             anyhow::bail!("bench failed: {}", resp["error"].clone());
         }
-        self.last_bench_noise_pct = resp["noise_pct"].as_f64();
-        self.last_bench_label = resp["representative_label"].as_str().map(|s| s.to_string());
-        self.last_bench_gbs = resp["representative_gbs"].as_f64();
-        self.last_bench_roofline_gbs = resp["representative_roofline_gbs"].as_f64();
-        // Use the slowest shape's median (least launch-overhead-dominated), not
-        // the median across a heterogeneous shape sweep.
-        let median_us = resp["representative_us"]
-            .as_f64()
-            .or_else(|| resp["median_us"].as_f64())
-            .context("bench returned no median_us")?;
+        // Parse + aggregate in Rust (representative shape, noise, bandwidth).
+        let parsed: Vec<crate::parse::ParsedBench> = resp["runs"]
+            .as_array()
+            .map(|runs| {
+                runs.iter()
+                    .map(|r| match self.target.backend {
+                        Backend::Ninfer => crate::parse::parse_bench_ninfer(
+                            r["stdout"].as_str().unwrap_or(""),
+                            r["csv"].as_str(),
+                        ),
+                        Backend::Llamacpp => {
+                            crate::parse::parse_bench_llama(r["stdout"].as_str().unwrap_or(""))
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let merged = crate::parse::merge_bench_runs(&parsed, self.bench_shape.as_deref());
+        if resp["exit_code"].as_i64().unwrap_or(1) != 0 || merged.representative_us.is_none() {
+            let rows: usize = parsed.iter().map(|p| p.rows.len()).sum();
+            anyhow::bail!(
+                "bench produced no usable measurements (exit {}, {} run(s), {} row(s))",
+                resp["exit_code"],
+                parsed.len(),
+                rows
+            );
+        }
+        self.last_bench_noise_pct = merged.noise_pct;
+        self.last_bench_label = merged.representative_label.clone();
+        self.last_bench_gbs = merged.representative_gbs;
+        self.last_bench_roofline_gbs = merged.representative_roofline_gbs;
+        let median_us = merged
+            .representative_us
+            .context("bench returned no representative_us")?;
         Ok(median_us / 1000.0)
     }
 

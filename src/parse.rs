@@ -292,6 +292,234 @@ pub fn parse_numstat(text: &str) -> Value {
 }
 
 // --------------------------------------------------------------------------- //
+// bench parsing + aggregation (Gate 4)
+// --------------------------------------------------------------------------- //
+
+/// One shape's measurement (median latency, label, bandwidth if reported).
+#[derive(Debug, Clone, Default)]
+pub struct BenchRow {
+    pub median_us: f64,
+    pub label: String,
+    pub line: Option<String>,
+    pub effective_gbs: Option<f64>,
+    pub roofline_gbs: Option<f64>,
+}
+
+/// One bench invocation's rows.
+#[derive(Debug, Clone, Default)]
+pub struct ParsedBench {
+    pub rows: Vec<BenchRow>,
+    pub median_us: Option<f64>,
+    pub best_median_us: Option<f64>,
+}
+
+/// Aggregated result across repeats (the Gate-4 representative + noise).
+#[derive(Debug, Clone, Default)]
+pub struct MergedBench {
+    pub rows: Vec<BenchRow>,
+    pub representative_us: Option<f64>,
+    pub representative_label: Option<String>,
+    pub representative_gbs: Option<f64>,
+    pub representative_roofline_gbs: Option<f64>,
+    pub noise_pct: Option<f64>,
+}
+
+fn median(v: &[f64]) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = s.len();
+    Some(if n % 2 == 1 {
+        s[n / 2]
+    } else {
+        (s[n / 2 - 1] + s[n / 2]) / 2.0
+    })
+}
+
+fn median_opt(mut v: Vec<f64>) -> Option<f64> {
+    v.retain(|x| x.is_finite());
+    median(&v)
+}
+
+fn median_column(cols: &[String]) -> Option<usize> {
+    if let Some(i) = cols.iter().position(|c| c.trim() == "median_us") {
+        return Some(i);
+    }
+    cols.iter().position(|c| {
+        let l = c.to_lowercase();
+        l.contains("median") && l.contains("us")
+    })
+}
+
+/// A human label for a CSV bench row (route/op/path + T when present).
+fn row_label(fields: &[String], cols: &[String]) -> String {
+    let mut parts = Vec::new();
+    for k in ["route", "op", "path", "policy", "T"] {
+        if let Some(i) = cols.iter().position(|c| c.trim() == k) {
+            if let Some(v) = fields.get(i) {
+                parts.push(format!("{k}={v}"));
+            }
+        }
+    }
+    if parts.is_empty() {
+        "row".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn finish(rows: Vec<BenchRow>) -> ParsedBench {
+    let medians: Vec<f64> = rows.iter().map(|r| r.median_us).collect();
+    let best = medians.iter().cloned().fold(f64::INFINITY, f64::min);
+    ParsedBench {
+        best_median_us: if best.is_finite() { Some(best) } else { None },
+        median_us: median(&medians),
+        rows,
+    }
+}
+
+/// Parse an op-bench CSV (`--csv-out`): rows of floats + aggregate median.
+pub fn parse_bench_csv(text: &str) -> ParsedBench {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let Some(header) = lines.next() else {
+        return ParsedBench::default();
+    };
+    let cols = csv_split(header);
+    let Some(mc) = median_column(&cols) else {
+        return ParsedBench::default();
+    };
+    let gbs_col = cols.iter().position(|c| c.trim() == "effective_gbs");
+    let roof_col = cols.iter().position(|c| c.trim() == "roofline_gbs");
+    let mut rows = Vec::new();
+    for line in lines {
+        let f = csv_split(line);
+        let Some(median_us) = f.get(mc).and_then(|v| v.trim().parse::<f64>().ok()) else {
+            continue;
+        };
+        let num = |i: Option<usize>| i.and_then(|i| f.get(i)).and_then(|v| v.trim().parse::<f64>().ok());
+        rows.push(BenchRow {
+            median_us,
+            label: row_label(&f, &cols),
+            line: None,
+            effective_gbs: num(gbs_col),
+            roofline_gbs: num(roof_col),
+        });
+    }
+    finish(rows)
+}
+
+/// Fallback for benches without `--csv-out` (e.g. add_bias): one line per shape.
+pub fn parse_bench_stdout(text: &str) -> ParsedBench {
+    let med_re = Regex::new(r"(?i)median\s*=\s*([0-9.]+)\s*us").expect("bench median regex");
+    let gbs_re = Regex::new(r"(?i)([0-9.]+)\s*GB/s").expect("bench gbs regex");
+    let roof_re = Regex::new(r"(?i)of\s+([0-9.]+)\s*GB/s\s+roofline").expect("bench roof regex");
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let Some(c) = med_re.captures(line) else {
+            continue;
+        };
+        let median_us = c[1].parse::<f64>().unwrap_or(0.0);
+        let label = line.split("median=").next().unwrap_or("").trim().to_string();
+        rows.push(BenchRow {
+            median_us,
+            label,
+            line: Some(line.trim().to_string()),
+            effective_gbs: gbs_re.captures(line).and_then(|c| c[1].parse::<f64>().ok()),
+            roofline_gbs: roof_re.captures(line).and_then(|c| c[1].parse::<f64>().ok()),
+        });
+    }
+    finish(rows)
+}
+
+/// Pick CSV when the bench wrote one, else fall back to the console output.
+pub fn parse_bench_ninfer(stdout: &str, csv: Option<&str>) -> ParsedBench {
+    match csv.filter(|c| !c.trim().is_empty()) {
+        Some(c) => parse_bench_csv(c),
+        None => parse_bench_stdout(stdout),
+    }
+}
+
+/// llama.cpp `test-backend-ops perf` console lines: `<n> runs - <t> us/run`.
+pub fn parse_bench_llama(text: &str) -> ParsedBench {
+    let us_re = Regex::new(r"(\d+)\s+runs\s+-\s+([0-9.]+)\s+us/run").expect("llama us regex");
+    let ansi = Regex::new(r"\x1b\[[0-9;]*m").expect("ansi regex");
+    let gbs_re = Regex::new(r"([0-9.]+)\s*GB/s").expect("llama gbs regex");
+    let mut rows = Vec::new();
+    for raw in text.lines() {
+        let line = ansi.replace_all(raw, "").to_string();
+        let Some(c) = us_re.captures(&line) else {
+            continue;
+        };
+        rows.push(BenchRow {
+            median_us: c[2].parse::<f64>().unwrap_or(0.0),
+            label: format!("{} runs", &c[1]),
+            line: Some(line.trim().chars().take(220).collect()),
+            effective_gbs: gbs_re.captures(&line).and_then(|c| c[1].parse::<f64>().ok()),
+            roofline_gbs: None,
+        });
+    }
+    finish(rows)
+}
+
+/// Aggregate repeated runs per shape. The representative is the row whose label
+/// contains `shape_filter` (else the *slowest* shape — least launch-overhead-
+/// dominated). `noise_pct` is the median relative spread across repeats.
+pub fn merge_bench_runs(runs: &[ParsedBench], shape_filter: Option<&str>) -> MergedBench {
+    let n = runs.iter().map(|r| r.rows.len()).min().unwrap_or(0);
+    let mut rows: Vec<BenchRow> = Vec::new();
+    let mut spreads: Vec<f64> = Vec::new();
+    for i in 0..n {
+        let vals: Vec<f64> = runs.iter().map(|r| r.rows[i].median_us).collect();
+        let med = median(&vals).unwrap_or(0.0);
+        if med > 0.0 {
+            let (mx, mn) = vals
+                .iter()
+                .fold((f64::MIN, f64::MAX), |(mx, mn), v| (mx.max(*v), mn.min(*v)));
+            spreads.push((mx - mn) / med);
+        }
+        rows.push(BenchRow {
+            median_us: med,
+            label: runs[0].rows[i].label.clone(),
+            line: runs[0].rows[i].line.clone(),
+            effective_gbs: median_opt(
+                runs.iter().filter_map(|r| r.rows[i].effective_gbs).collect(),
+            ),
+            roofline_gbs: median_opt(
+                runs.iter().filter_map(|r| r.rows[i].roofline_gbs).collect(),
+            ),
+        });
+    }
+    let mut candidates: Vec<usize> = (0..rows.len()).collect();
+    if let Some(f) = shape_filter {
+        let fl = f.to_lowercase();
+        let matching: Vec<usize> = (0..rows.len())
+            .filter(|&i| rows[i].label.to_lowercase().contains(&fl))
+            .collect();
+        if !matching.is_empty() {
+            candidates = matching;
+        }
+    }
+    let rep = candidates
+        .into_iter()
+        .max_by(|&a, &b| {
+            rows[a]
+                .median_us
+                .partial_cmp(&rows[b].median_us)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    MergedBench {
+        representative_us: rep.map(|i| rows[i].median_us),
+        representative_label: rep.map(|i| rows[i].label.clone()),
+        representative_gbs: rep.and_then(|i| rows[i].effective_gbs),
+        representative_roofline_gbs: rep.and_then(|i| rows[i].roofline_gbs),
+        noise_pct: median_opt(spreads),
+        rows,
+    }
+}
+
+// --------------------------------------------------------------------------- //
 // Runner-response views: compute the parsed fields in Rust from the raw output
 // --------------------------------------------------------------------------- //
 
@@ -459,5 +687,43 @@ src/ops/kernel/a.cuh(8): error: #include expects \"FILENAME\"
         assert_eq!(s["file_count"], 3);
         assert_eq!(s["insertions"], 5);
         assert_eq!(s["deletions"], 1);
+    }
+
+    #[test]
+    fn bench_stdout_parses_gbs_and_roofline() {
+        let text = "\
+add_bias [1152,4096 ]            median=    4.94 us  min=    4.91 us  p95=    4.96 us    3821.5 GB/s  (213.3% of 1792 GB/s roofline)
+add_bias [4608,16384]            median=  181.08 us  min=  179.70 us  p95=  182.79 us    1667.7 GB/s  (93.1% of 1792 GB/s roofline)
+";
+        let p = parse_bench_stdout(text);
+        assert_eq!(p.rows.len(), 2);
+        assert_eq!(p.rows[0].label, "add_bias [1152,4096 ]");
+        assert_eq!(p.rows[0].effective_gbs, Some(3821.5));
+        assert_eq!(p.rows[0].roofline_gbs, Some(1792.0));
+        assert_eq!(p.rows[1].median_us, 181.08);
+    }
+
+    #[test]
+    fn bench_merge_uses_slowest_shape_and_noise() {
+        let r1 = parse_bench_stdout("x median= 10.0 us\nx median= 100.0 us\n");
+        let r2 = parse_bench_stdout("x median= 10.2 us\nx median= 101.0 us\n");
+        let m = merge_bench_runs(&[r1, r2], None);
+        assert_eq!(m.representative_us, Some(100.5));
+        assert!(m.noise_pct.unwrap() >= 0.0);
+        // A shape filter picks the matching row even when it is not the slowest.
+        let r = parse_bench_csv("median_us,route\n10.0,\"a [1152,8]\"\n100.0,\"a [1152,4096]\"\n");
+        let m2 = merge_bench_runs(&[r], Some("1152,8"));
+        assert_eq!(m2.representative_us, Some(10.0));
+        // No match -> fall back to the slowest shape.
+        let r = parse_bench_csv("median_us,route\n10.0,\"a [1152,8]\"\n100.0,\"a [1152,4096]\"\n");
+        assert_eq!(merge_bench_runs(&[r], Some("nope")).representative_us, Some(100.0));
+    }
+
+    #[test]
+    fn bench_llama_parses_us_per_run() {
+        let p = parse_bench_llama("  CUDA0 SOFT_MAX(1024): 5 runs - 12.34 us/run - 100.5 GB/s\n");
+        assert_eq!(p.rows.len(), 1);
+        assert_eq!(p.rows[0].median_us, 12.34);
+        assert_eq!(p.rows[0].effective_gbs, Some(100.5));
     }
 }

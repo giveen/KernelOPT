@@ -556,51 +556,32 @@ def cuda_bench(request: dict) -> dict:
 
     # Repeat the whole bench so a single noisy sample can't masquerade as a win.
     repeats = max(1, int(request.get("repeats", 1)))
-    parsed_runs: list[dict] = []
+    runs: list[dict] = []
     proc = None
     for _ in range(repeats):
         try:
             proc = _run(argv, None, timeout)
         except subprocess.TimeoutExpired:
             return _err("timeout", f"bench timed out after {timeout}s")
-        stdout = proc.stdout or ""
         csv_text = ""
-        used_csv = False
         if csv_out and os.path.exists(csv_out):
             with open(csv_out, "r") as f:
                 csv_text = f.read()
-            used_csv = bool(csv_text.strip())
-        parsed = parse_bench_csv(csv_text) if used_csv else parse_bench_stdout(stdout)
-        if parsed["rows"]:
-            parsed_runs.append(parsed)
+        runs.append(
+            {
+                "stdout": proc.stdout or "",
+                "csv": csv_text if csv_text.strip() else None,
+            }
+        )
 
-    if not parsed_runs:
-        return {
-            "ok": True,
-            "passed": False,
-            "error_kind": "no_measurements",
-            "exit_code": proc.returncode if proc else None,
-            "command": " ".join(argv),
-            "stdout_tail": (proc.stdout or "")[-3000:] if proc else "",
-            "stderr_tail": (proc.stderr or "")[-2000:] if proc else "",
-            "rows": [],
-            "median_us": None,
-            "representative_us": None,
-            "noise_pct": None,
-            "row_count": 0,
-        }
-    merged = _merge_bench_runs(parsed_runs, request.get("shape_filter"))
+    # Parsing + aggregation (representative shape, noise) live in Rust now.
     return {
         "ok": True,
-        "passed": proc.returncode == 0 and merged["representative_us"] is not None,
+        "passed": proc.returncode == 0,
         "exit_code": proc.returncode,
         "command": " ".join(argv),
-        "used_csv": used_csv,
-        "capabilities": sorted(caps),
-        "csv_path": csv_out if used_csv else None,
         "repeats": repeats,
-        "stdout_tail": (proc.stdout or "")[-2000:],
-        **merged,
+        "runs": runs,
     }
 
 

@@ -49,6 +49,19 @@ def runner_cmd(request: dict) -> dict:
     return json.loads(proc.stdout)
 
 
+def bench_us(resp: dict, shape: str | None = None) -> float:
+    """Representative µs from the runner's raw runs.
+
+    The runner now returns raw bench output; Rust does this in production (see
+    `parse::merge_bench_runs`). The Python helpers remain, so the integration
+    controls still exercise the real runner output end to end.
+    """
+    runs = [ninfer.parse_bench_stdout(r["stdout"]) for r in resp.get("runs", [])]
+    runs = [r for r in runs if r["rows"]]
+    assert runs, resp
+    return ninfer._merge_bench_runs(runs, shape)["representative_us"]
+
+
 # --------------------------------------------------------------------------- #
 # parsers
 # --------------------------------------------------------------------------- #
@@ -194,8 +207,9 @@ def test_cuda_bench_add_bias_real():
         }
     )
     assert resp["ok"] is True, resp
-    assert resp["median_us"] and resp["median_us"] > 0
-    assert resp["row_count"] >= 1
+    # The runner returns raw runs; Rust parses them (see parse::merge_bench_runs).
+    assert resp["runs"], resp
+    assert bench_us(resp) and bench_us(resp) > 0
 
 
 @needs_build
@@ -219,8 +233,9 @@ def test_cuda_bench_same_binary_is_stable():
 
     a, b = bench(), bench()
     assert a["ok"] and b["ok"], (a, b)
-    rel = abs(a["median_us"] - b["median_us"]) / a["median_us"]
-    assert rel < 0.05, f"same binary drifted {rel:.1%}: {a['median_us']} vs {b['median_us']}"
+    ua, ub = bench_us(a), bench_us(b)
+    rel = abs(ua - ub) / ua
+    assert rel < 0.05, f"same binary drifted {rel:.1%}: {ua} vs {ub}"
 
 
 @needs_build
@@ -245,10 +260,8 @@ def test_cuda_bench_detects_a_real_difference():
 
     small, big = bench(4096), bench(65536)
     assert small["ok"] and big["ok"], (small, big)
-    assert big["median_us"] > small["median_us"] * 1.5, (
-        small["median_us"],
-        big["median_us"],
-    )
+    us_small, us_big = bench_us(small), bench_us(big)
+    assert us_big > us_small * 1.5, (us_small, us_big)
 
 
 @needs_build
