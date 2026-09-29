@@ -1,14 +1,18 @@
 # KernelOPT
 
-Dispatch-aware, agentic GPU-kernel optimization. Point KernelOPT at a **directory
-of kernels**; it profiles them and drives a profile → plan → edit → verify → gate
-loop until each is faster — or a budget runs out. Your working tree is never
-touched: edits happen in an isolated git worktree, every accepted candidate is
-**committed and tagged** (so it can be read or reverted instantly), and the winner
-is handed back as a unified diff.
+Dispatch-aware, agentic GPU-kernel optimization. Point KernelOPT at a **single
+kernel, a directory of kernels, or a whole model** — Triton kernels in a compiled
+PyTorch model, a CUDA op in ninfer, a ggml-cuda kernel in llama.cpp, or **any CUDA
+repo** that declares its build/test/bench in `kernelopt.toml`. It profiles them
+and drives a profile → plan → edit → verify → gate loop until each is faster — or
+a budget runs out. Your working tree is never touched: edits happen in an isolated
+git worktree, every accepted candidate is **committed and tagged** (so it can be
+read or reverted instantly), and the winner is handed back as a unified diff.
 
 An implementation of *KernelOPT: Dispatch-Aware Agentic Search for GPU Kernel
-Optimization* (arXiv:2609.30059), extended to CUDA kernel trees.
+Optimization* (arXiv:2609.30059), extended from its Triton/Inductor setting to
+CUDA kernel trees (ninfer, llama.cpp) and a generic descriptor-driven CUDA
+backend, with NVIDIA-suite profiling (nsys/ncu) for engine-share ranking.
 
 | Mode | Target tree | Optimization unit | Correctness | Timing |
 |---|---|---|---|---|
