@@ -28,7 +28,7 @@ import subprocess
 import sys
 import time
 
-from .ninfer import _err
+from .common import _err
 
 _PPL_RE = re.compile(r"^overall\s+\d+\s+[0-9.]+\s+([0-9.]+)", re.MULTILINE)
 _LLAMA_PPL_RE = re.compile(r"\[\d+\]\d+.*?ppl\s*=\s*([0-9.]+)", re.IGNORECASE)

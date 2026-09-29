@@ -60,6 +60,13 @@ out: {worktree, branch, base, head, reused?}
 linked worktree; `reset` discards edits/untracked files; `remove` deletes worktree + branch.
 
 ### `cuda_compile` — Gate 1 (static validation)
+
+> **Note:** the `cuda_*`/`llama_*` runner commands below are now implemented in
+> Rust — `src/exec.rs` spawns the tools (cmake/ctest/bench/ncu/test-backend-ops)
+> and `src/parse.rs` parses their output. The Python runner is only needed for
+> Triton (`trace`/`verify`/`bench`/`ncu`), the engine E2E (`engine_*`), and
+> Graphsignal (`graphsignal_*`).
+
 ```
 in:  {worktree, kernel_files[], build_target}
 do:  cmake --build .kernelopt/ninfer/build --target <op test + bench targets> -j

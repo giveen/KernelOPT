@@ -276,7 +276,10 @@ src/
   signals.rs         /signals summarizer      analyst.rs   NCU bottleneck tier
   dotenv.rs          .env loader             memory.rs    experience memory
   journal.rs         append-only run log      gpu_lock.rs  cross-process GPU lock
-runner/kernelopt_runner/   Python runner (cuda_*, llama_*, graphsignal_*, engine_*)
+  exec.rs            tool invocation (cmake/ctest/bench/ncu)   parse.rs  output parsers
+  git.rs             worktree/diff/patch      models.rs    local-model discovery
+  wizard.rs          guided setup
+runner/kernelopt_runner/   Python runner (triton trace/verify/bench/ncu, engine_*, graphsignal_*)
 prompts/                   agent prompts
 docs/                      this directory
 ```

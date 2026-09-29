@@ -27,7 +27,7 @@ use crate::search::{diverse_select, meltdown_detected, Candidate};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -288,63 +288,6 @@ impl<'a> CudaPipeline<'a> {
 
     // ---------- runner request builders (backend-specific) ----------
 
-    fn verify_request(&self) -> serde_json::Value {
-        match self.target.backend {
-            Backend::Ninfer => json!({
-                "build_dir": self.build_dir,
-                "tests": self.target.test_filters,
-            }),
-            Backend::Llamacpp => json!({
-                "build_dir": self.build_dir,
-                "ops": self.target.test_filters,
-            }),
-        }
-    }
-
-    fn verify_command(&self) -> &'static str {
-        match self.target.backend {
-            Backend::Ninfer => "cuda_verify",
-            Backend::Llamacpp => "llama_verify",
-        }
-    }
-
-    fn bench_command(&self) -> &'static str {
-        match self.target.backend {
-            Backend::Ninfer => "cuda_bench",
-            Backend::Llamacpp => "llama_bench",
-        }
-    }
-
-    fn ncu_command(&self) -> &'static str {
-        match self.target.backend {
-            Backend::Ninfer => "cuda_ncu",
-            Backend::Llamacpp => "llama_ncu",
-        }
-    }
-
-    /// Bench request. `csv_out` is only meaningful for ninfer's op benches.
-    fn bench_request(&self, csv: &std::path::Path) -> serde_json::Value {
-        match self.target.backend {
-            Backend::Ninfer => json!({
-                "build_dir": self.build_dir,
-                "binary": self.target.bench_binary,
-                "args": self.target.bench_args,
-                "csv_out": csv,
-                "warmup": 20,
-                "repeat": 100,
-                "repeats": 3,
-                "shape_filter": self.bench_shape,
-            }),
-            Backend::Llamacpp => json!({
-                "build_dir": self.build_dir,
-                "ops": self.target.test_filters,
-                "args": self.target.bench_args,
-                "repeats": 3,
-                "shape_filter": self.bench_shape,
-            }),
-        }
-    }
-
     fn compile_targets(&self) -> Vec<String> {
         let mut t = self.target.build_targets.clone();
         // The engine E2E gate runs app binaries built from the worktree.
@@ -403,21 +346,17 @@ impl<'a> CudaPipeline<'a> {
             data: json!({"worktree": self.worktree, "head": wt["head"], "reused": wt["reused"]}),
         })?;
 
-        let cfg = self
-            .call_timeout(
-                "cuda_compile",
-                json!({
-                    "worktree": self.worktree,
-                    "build_dir": self.build_dir,
-                    "targets": self.compile_targets(),
-                    "configure": true,
-                    "force_configure": true,
-                    "configure_args": self.target.backend.configure_args(),
-                    "jobs": num_cpus(),
-                }),
-                3600,
-            )
-            .context("cuda_compile (configure+build)")?;
+        let cfg = crate::exec::build(
+            &self.worktree,
+            &self.build_dir,
+            &self.compile_targets(),
+            true,
+            true,
+            &self.target.backend.configure_args(),
+            num_cpus(),
+            3600,
+        )
+        .context("cuda_compile (configure+build)")?;
         let cfg = crate::parse::compile_view(&cfg);
         self.journal.record(&Event::StageCompleted {
             stage: "compile_baseline".into(),
@@ -427,10 +366,7 @@ impl<'a> CudaPipeline<'a> {
             anyhow::bail!("baseline build failed: {}", first_error(&cfg));
         }
 
-        let verify = self
-            .call_timeout(self.verify_command(), self.verify_request(), 1800)
-            .context("verify (baseline)")?;
-        let verify = crate::parse::verify_view(&verify, self.target.backend);
+        let verify = self.verify_now().context("verify (baseline)")?;
         self.journal.record(&Event::StageCompleted {
             stage: "verify_baseline".into(),
             data: json!({"passed": verify["passed"], "failing": verify["failing_cases"]}),
@@ -464,6 +400,20 @@ impl<'a> CudaPipeline<'a> {
         Ok(baseline_ms)
     }
 
+    /// Resolve the op-bench binary (absolute, else `<build>/bench/<name>`).
+    fn bench_binary_path(&self) -> Result<PathBuf> {
+        let b = self
+            .target
+            .bench_binary
+            .as_deref()
+            .context("no bench binary for this target")?;
+        Ok(if Path::new(b).is_absolute() {
+            PathBuf::from(b)
+        } else {
+            self.build_dir.join("bench").join(b)
+        })
+    }
+
     fn bench(&mut self, source: Option<&str>) -> Result<f64> {
         if let Some(src) = source {
             std::fs::write(self.target_path(), src).context("writing kernel into worktree")?;
@@ -472,10 +422,35 @@ impl<'a> CudaPipeline<'a> {
             .run_dir
             .join("bench")
             .join(format!("{}.csv", uuid::Uuid::new_v4().simple()));
-        let resp = self.gpu_call_timeout(self.bench_command(), self.bench_request(&csv), 1800)?;
-        if resp["ok"] != json!(true) {
-            anyhow::bail!("bench failed: {}", resp["error"].clone());
-        }
+        // Direct invocation (GPU-serialized); parsing + aggregation in Rust.
+        let resp = {
+            let _guard = crate::gpu_lock::lock(&self.gpu_lock_path)?;
+            match self.target.backend {
+                Backend::Ninfer => {
+                    let bin = self.bench_binary_path()?;
+                    crate::exec::bench(
+                        &bin,
+                        &self.target.bench_args,
+                        Some(&csv),
+                        Some(20),
+                        Some(100),
+                        3,
+                        1800,
+                    )?
+                }
+                Backend::Llamacpp => {
+                    let bin = self.build_dir.join("bin").join("test-backend-ops");
+                    crate::exec::llama_perf(
+                        &bin,
+                        "CUDA0",
+                        &self.target.test_filters,
+                        &self.target.bench_args,
+                        3,
+                        1800,
+                    )?
+                }
+            }
+        };
         // Parse + aggregate in Rust (representative shape, noise, bandwidth).
         let parsed: Vec<crate::parse::ParsedBench> = resp["runs"]
             .as_array()
@@ -518,30 +493,51 @@ impl<'a> CudaPipeline<'a> {
             .run_dir
             .join("ncu")
             .join(format!("{}.csv", uuid::Uuid::new_v4().simple()));
-        let report_path = report.clone();
-        let req = match self.target.backend {
-            Backend::Ninfer => json!({
-                "build_dir": self.build_dir,
-                "binary": self.target.bench_binary,
-                "args": self.target.bench_args,
-                "ncu_set": self.ncu_set,
-                "launch_skip": 5,
-                "launch_count": 1,
-                "report_path": report_path,
-                "timeout_s": 1200,
-            }),
-            Backend::Llamacpp => json!({
-                "build_dir": self.build_dir,
-                "ops": self.target.test_filters,
-                "ncu_set": self.ncu_set,
-                "launch_skip": 3,
-                "launch_count": 1,
-                "report_path": report_path,
-                "timeout_s": 1200,
-            }),
+        let (target_argv, launch_skip) = match self.target.backend {
+            Backend::Ninfer => {
+                let bin = match self.bench_binary_path() {
+                    Ok(b) => b,
+                    Err(e) => return self.note_profile(&e.to_string()),
+                };
+                let mut v = vec![bin.to_string_lossy().to_string()];
+                v.extend(self.target.bench_args.iter().cloned());
+                (v, 5u32)
+            }
+            Backend::Llamacpp => {
+                let bin = self.build_dir.join("bin").join("test-backend-ops");
+                let mut v = vec![
+                    bin.to_string_lossy().to_string(),
+                    "perf".into(),
+                    "-b".into(),
+                    "CUDA0".into(),
+                ];
+                if !self.target.test_filters.is_empty() {
+                    v.push("-o".into());
+                    v.push(self.target.test_filters.join(","));
+                }
+                (v, 3u32)
+            }
         };
-        match self.gpu_call_timeout(self.ncu_command(), req, 1500) {
-            Ok(resp) if resp["ok"] == json!(true) => {
+        let resp = {
+            let _guard = match crate::gpu_lock::lock(&self.gpu_lock_path) {
+                Ok(g) => g,
+                Err(e) => return self.note_profile(&e.to_string()),
+            };
+            crate::exec::ncu(
+                &target_argv,
+                &self.ncu_set,
+                Some(launch_skip),
+                Some(1),
+                None,
+                1200,
+            )
+        };
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => return self.note_profile(&format!("{e:#}")),
+        };
+        {
+            {
                 // ncu CSV parsing lives in Rust now.
                 let csv = crate::parse::extract_ncu_csv(resp["raw_stdout"].as_str().unwrap_or(""));
                 let mut context = crate::parse::parse_ncu_csv(&csv);
@@ -583,7 +579,7 @@ impl<'a> CudaPipeline<'a> {
                     let _ = std::fs::write(&report, &csv);
                     context["raw_csv_path"] = json!(report.to_string_lossy());
                 }
-                context["ncu_command"] = resp["command"].clone();
+                context["ncu_command"] = json!(target_argv.join(" "));
                 let ctx = analyst::planning_context(&context, 3);
                 let _ = self.journal.record(&Event::StageCompleted {
                     stage: "profile".into(),
@@ -591,22 +587,16 @@ impl<'a> CudaPipeline<'a> {
                 });
                 Some(ctx)
             }
-            Ok(resp) => {
-                let msg = resp["error"]["message"].as_str().unwrap_or("ncu failed");
-                let _ = self.journal.record(&Event::StageCompleted {
-                    stage: "profile".into(),
-                    data: json!({"available": false, "note": msg}),
-                });
-                None
-            }
-            Err(e) => {
-                let _ = self.journal.record(&Event::StageCompleted {
-                    stage: "profile".into(),
-                    data: json!({"available": false, "note": e.to_string()}),
-                });
-                None
-            }
         }
+    }
+
+    /// Journal a `profile` note (ncu unavailable) and return None.
+    fn note_profile(&mut self, note: &str) -> Option<serde_json::Value> {
+        let _ = self.journal.record(&Event::StageCompleted {
+            stage: "profile".into(),
+            data: json!({"available": false, "note": note}),
+        });
+        None
     }
 
     // ---------- plan ----------
@@ -973,17 +963,7 @@ impl<'a> CudaPipeline<'a> {
             std::fs::write(self.target_path(), &candidate_source)
                 .context("writing candidate into worktree")?;
 
-            let compile = self.call_timeout(
-                "cuda_compile",
-                json!({
-                    "worktree": self.worktree,
-                    "build_dir": self.build_dir,
-                    "targets": self.compile_targets(),
-                    "jobs": num_cpus(),
-                }),
-                3600,
-            )?;
-            let compile = crate::parse::compile_view(&compile);
+            let compile = self.compile_now()?;
             if compile["passed"] != json!(true) {
                 let err = format_compiler_errors(&compile);
                 self.progress(format!("  c{chain_idx} ✗ compile: {}", flatten(&err)));
@@ -999,9 +979,7 @@ impl<'a> CudaPipeline<'a> {
                 continue;
             }
 
-            let verify = self
-                .gpu_call_timeout(self.verify_command(), self.verify_request(), 1800)?;
-            let verify = crate::parse::verify_view(&verify, self.target.backend);
+            let verify = self.verify_now()?;
             if verify["passed"] != json!(true) {
                 let err = format_verify_failure(&verify);
                 self.progress(format!("  c{chain_idx} ✗ correctness: {}", flatten(&err)));
@@ -1814,17 +1792,30 @@ impl<'a> CudaPipeline<'a> {
     // ---------- finalize helpers ----------
 
     fn compile_now(&self) -> Result<serde_json::Value> {
-        let resp = self.call_timeout(
-            "cuda_compile",
-            json!({"worktree": self.worktree, "build_dir": self.build_dir,
-                   "targets": self.compile_targets(), "jobs": num_cpus()}),
+        let resp = crate::exec::build(
+            &self.worktree,
+            &self.build_dir,
+            &self.compile_targets(),
+            false,
+            false,
+            &[],
+            num_cpus(),
             3600,
         )?;
         Ok(crate::parse::compile_view(&resp))
     }
 
     fn verify_now(&self) -> Result<serde_json::Value> {
-        let resp = self.gpu_call_timeout(self.verify_command(), self.verify_request(), 1800)?;
+        let _guard = crate::gpu_lock::lock(&self.gpu_lock_path)?;
+        let resp = match self.target.backend {
+            Backend::Ninfer => {
+                crate::exec::ctest(&self.build_dir, &self.target.test_filters, 1800)?
+            }
+            Backend::Llamacpp => {
+                let bin = self.build_dir.join("bin").join("test-backend-ops");
+                crate::exec::llama_test(&bin, "CUDA0", &self.target.test_filters, 1800)?
+            }
+        };
         Ok(crate::parse::verify_view(&resp, self.target.backend))
     }
 

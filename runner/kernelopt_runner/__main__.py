@@ -81,12 +81,6 @@ def main() -> int:
             from . import e2e as cmd
         elif command == "ncu":
             from . import ncu as cmd
-        elif command.startswith("cuda_"):
-            # ninfer-mode commands (cuda_compile/verify/bench/ncu/worktree/diff/...)
-            from . import ninfer as cmd
-        elif command.startswith("llama_"):
-            # llama.cpp mode commands (llama_verify/bench/ncu)
-            from . import llamacpp as cmd
         elif command in ("graphsignal_profile", "graphsignal_setup"):
             from . import graphsignal as cmd
         elif command in ("engine_generate", "engine_perplexity"):

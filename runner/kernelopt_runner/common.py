@@ -7,6 +7,11 @@ import sys
 import types
 
 
+def _err(kind: str, message: str, traceback_text: str = "") -> dict:
+    """Structured error every consumer (Executor retry loop) relies on."""
+    return {"ok": False, "error": {"kind": kind, "message": message, "traceback": traceback_text}}
+
+
 def load_module(path: str, name_hint: str) -> types.ModuleType:
     """Import a Python file by path."""
     path = os.path.abspath(path)
