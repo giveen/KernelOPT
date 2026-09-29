@@ -1448,13 +1448,22 @@ impl<'a> CudaPipeline<'a> {
             true
         };
 
-        let gate4 = if !self.target.timing {
-            true // correctness-only target: no perf gate
-        } else {
-            final_ms
-                .map(|ms| ms <= baseline_final_ms * self.cfg.hyper.gamma)
-                .unwrap_or(false)
-        };
+        // Gate 4 verdict (pure, unit-tested below): a candidate counts as a real
+        // improvement only if it beats the fresh baseline beyond BOTH the noise
+        // floor and the minimum effect, AND wins every interleaved round.
+        let noise = self.last_bench_noise_pct.unwrap_or(0.0);
+        let verdict = performance_verdict(
+            baseline_final_ms,
+            final_ms,
+            noise,
+            self.min_improvement,
+            rounds,
+            wins,
+            self.cfg.hyper.gamma,
+        );
+        let gate4 = !self.target.timing || verdict.gate4;
+        let speedup = final_ms.map(|_| verdict.speedup);
+        let within_noise = verdict.within_noise;
 
         let diff = self.call(
             "cuda_diff",
@@ -1489,17 +1498,8 @@ impl<'a> CudaPipeline<'a> {
             }),
         })?;
 
-        let speedup = final_ms.map(|m| if m > 0.0 { baseline_final_ms / m } else { 1.0 });
-        // "Optimized" requires: beats the fresh baseline by more than the noise
-        // floor and the minimum effect, AND wins every interleaved round.
-        let noise = self.last_bench_noise_pct.unwrap_or(0.0);
-        let improvement = final_ms
-            .map(|m| if m > 0.0 { baseline_final_ms / m - 1.0 } else { 0.0 })
-            .unwrap_or(0.0);
-        let within_noise = improvement <= noise;
-        let won_all = rounds == 0 || wins == rounds;
         let (outcome, root_cause) = if passed {
-            if !self.target.timing || (improvement > self.min_improvement && !within_noise && won_all) {
+            if !self.target.timing || verdict.optimized {
                 ("optimized", None)
             } else {
                 ("matched", None)
@@ -1959,6 +1959,52 @@ fn engine_gate(base: &E2eResult, cand: &E2eResult, gamma: f64) -> (bool, serde_j
     )
 }
 
+/// Gate-4 performance verdict. Pure so it can be unit-tested as a
+/// positive/negative control: it must report `optimized` only for a real,
+/// repeatable improvement that clears both the noise floor and the configured
+/// minimum effect, and wins every interleaved round.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerfVerdict {
+    /// Candidate is not slower than `gamma * baseline`.
+    pub gate4: bool,
+    /// Candidate is a real, repeatable win (safe to call "optimized").
+    pub optimized: bool,
+    /// Measured improvement is within the measurement noise floor.
+    pub within_noise: bool,
+    /// `baseline/final - 1` (0 when there is no timing).
+    pub improvement: f64,
+    /// `baseline/final` (1.0 when there is no timing).
+    pub speedup: f64,
+}
+
+pub fn performance_verdict(
+    baseline_ms: f64,
+    final_ms: Option<f64>,
+    noise_pct: f64,
+    min_improvement: f64,
+    rounds: u32,
+    wins: u32,
+    gamma: f64,
+) -> PerfVerdict {
+    let speedup = final_ms
+        .map(|m| if m > 0.0 { baseline_ms / m } else { 1.0 })
+        .unwrap_or(1.0);
+    let improvement = final_ms
+        .map(|m| if m > 0.0 { baseline_ms / m - 1.0 } else { 0.0 })
+        .unwrap_or(0.0);
+    let gate4 = final_ms.map(|m| m <= baseline_ms * gamma).unwrap_or(false);
+    let within_noise = improvement <= noise_pct;
+    let won_all = rounds == 0 || wins == rounds;
+    let optimized = gate4 && improvement > min_improvement && !within_noise && won_all;
+    PerfVerdict {
+        gate4,
+        optimized,
+        within_noise,
+        improvement,
+        speedup,
+    }
+}
+
 fn first_error(compile: &serde_json::Value) -> String {
     compile["compiler_errors"]
         .as_array()
@@ -2060,7 +2106,8 @@ mod tests {
     }
 
     #[test]
-    fn engine_gate_checks_tokens_and_speed() {        let base = E2eResult { digest: "a".into(), elapsed_s: 5.0, text: "x".into() };
+    fn engine_gate_checks_tokens_and_speed() {
+        let base = E2eResult { digest: "a".into(), elapsed_s: 5.0, text: "x".into() };
         let same = E2eResult { digest: "a".into(), elapsed_s: 5.0, text: "x".into() };
         assert!(engine_gate(&base, &same, 1.03).0);
         // different tokens => correctness fail
@@ -2072,5 +2119,48 @@ mod tests {
         // within the noise margin => pass
         let ok = E2eResult { digest: "a".into(), elapsed_s: 5.1, text: "x".into() };
         assert!(engine_gate(&base, &ok, 1.03).0);
+    }
+
+    // ---- Positive/negative controls for the performance gate ---------------- //
+    // These prove the gate reports a real improvement (not merely a correct
+    // change) and refuses to report one for noise or an unstable win.
+
+    #[test]
+    fn perf_verdict_reports_a_real_win() {
+        // 30% faster, above the 1% noise floor, wins both interleaved rounds.
+        let v = performance_verdict(1.0, Some(0.70), 0.01, 0.01, 2, 2, 1.05);
+        assert!(v.optimized, "expected optimized: {v:?}");
+        assert!(v.gate4 && !v.within_noise);
+        assert!((v.speedup - 1.4286).abs() < 1e-3, "{v:?}");
+        assert!((v.improvement - 0.4286).abs() < 1e-3, "{v:?}");
+    }
+
+    #[test]
+    fn perf_verdict_rejects_correct_but_not_faster() {
+        // A correct change that does not beat the baseline => matched, not optimized.
+        let v = performance_verdict(1.0, Some(1.0), 0.01, 0.01, 2, 0, 1.05);
+        assert!(!v.optimized && v.within_noise);
+        assert!(v.gate4);
+        // 0.5% faster, but inside the 1% noise floor => matched.
+        let v = performance_verdict(1.0, Some(0.995), 0.01, 0.01, 2, 2, 1.05);
+        assert!(!v.optimized && v.within_noise);
+    }
+
+    #[test]
+    fn perf_verdict_rejects_unstable_or_slow_wins() {
+        // 20% faster on the median but only won 1 of 2 rounds => matched.
+        let v = performance_verdict(1.0, Some(0.80), 0.01, 0.01, 2, 1, 1.05);
+        assert!(!v.optimized, "unstable win must not count: {v:?}");
+        // Slower than gamma*baseline => gate4 fails (=> fallback).
+        let v = performance_verdict(1.0, Some(1.10), 0.01, 0.01, 2, 0, 1.05);
+        assert!(!v.gate4 && !v.optimized);
+    }
+
+    #[test]
+    fn perf_verdict_without_timing_is_not_optimized() {
+        // correctness-only targets: gate4 is overridden by !timing in finalize.
+        let v = performance_verdict(1.0, None, 0.0, 0.01, 0, 0, 1.05);
+        assert!(!v.optimized && !v.gate4);
+        assert_eq!(v.speedup, 1.0);
     }
 }

@@ -181,6 +181,59 @@ def test_cuda_bench_add_bias_real():
 
 
 @needs_build
+def test_cuda_bench_same_binary_is_stable():
+    """Negative control: re-benching an unchanged binary must NOT show a win.
+
+    Two independent measurements of the same binary must agree within a few
+    percent — that agreement is the noise floor the perf gate relies on.
+    """
+
+    def bench():
+        return runner_cmd(
+            {
+                "command": "cuda_bench",
+                "build_dir": NINFER_BUILD,
+                "binary": "ninfer_add_bias_bench",
+                "args": ["--d", "1152", "--columns", "4096"],
+                "repeats": 3,
+            }
+        )
+
+    a, b = bench(), bench()
+    assert a["ok"] and b["ok"], (a, b)
+    rel = abs(a["median_us"] - b["median_us"]) / a["median_us"]
+    assert rel < 0.05, f"same binary drifted {rel:.1%}: {a['median_us']} vs {b['median_us']}"
+
+
+@needs_build
+def test_cuda_bench_detects_a_real_difference():
+    """Positive control: the bench can distinguish a much slower config.
+
+    A 16x larger column count must be measurably slower; this proves the
+    measurement pipeline can detect a real performance difference, so a
+    `matched` verdict is a finding and not a blind spot.
+    """
+
+    def bench(columns):
+        return runner_cmd(
+            {
+                "command": "cuda_bench",
+                "build_dir": NINFER_BUILD,
+                "binary": "ninfer_add_bias_bench",
+                "args": ["--d", "1152", "--columns", str(columns)],
+                "repeats": 3,
+            }
+        )
+
+    small, big = bench(4096), bench(65536)
+    assert small["ok"] and big["ok"], (small, big)
+    assert big["median_us"] > small["median_us"] * 1.5, (
+        small["median_us"],
+        big["median_us"],
+    )
+
+
+@needs_build
 def test_cuda_verify_add_bias_real():
     resp = runner_cmd(
         {
