@@ -15,8 +15,9 @@ kernelopt campaign --mode ninfer --watch
 
 `--watch` tails the run's own `journal.jsonl` (timestamped: start, baseline
 stages, LLM calls, candidates, gates, finish) and prints it to stderr while the
-pipeline runs in the same process. `--quiet` still silences the terse per-iteration
-lines; `--watch` and `--quiet` are independent.
+pipeline runs in the same process. On `RunFinished` it prints the `report.md`
+and `report.diff` paths so the diff is easy to find. `--quiet` still silences the
+terse per-iteration lines; `--watch` and `--quiet` are independent.
 
 ## Live progress
 
@@ -53,9 +54,25 @@ The raw per-call detail is always in the run's `journal.jsonl`.
 run (started with `&`, `nohup`, or in another session), or just to re-read one:
 
 ```bash
-kernelopt watch --latest          # follow the most recent run (Ctrl-C to stop)
+kernelopt watch --latest          # follow the most recent run until it finishes
 kernelopt watch <run_id>          # follow a specific run
 kernelopt watch --latest --once   # print what exists and exit
+kernelopt watch --latest --follow # keep following past RunFinished (e.g. campaigns)
+```
+
+When the run reports `RunFinished`, `watch` stops on its own, prints the winner
+(what changed / why faster) and the artifact paths, so you can find the diff:
+
+```
+■ finished optimized 1.032x
+
+## winner — what changed / why it's faster
+…
+
+artifacts:
+  report:  .kernelopt/runs/<run_id>/report.md
+  diff:    .kernelopt/runs/<run_id>/report.diff
+  journal: .kernelopt/runs/<run_id>/journal.jsonl
 ```
 
 To run detached and attach later:
