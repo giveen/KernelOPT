@@ -98,7 +98,7 @@ All writes go to a **linked git worktree**, never your tree:
 ```
 
 Between beam chains the pipeline resets the worktree to the recorded base commit
-(`cuda_worktree reset` → `git reset --hard <base>` + `git clean -fd`), so each
+(`git reset --hard <base>` + `git clean -fd`, via `src/git.rs`), so each
 chain starts from the pristine baseline kernel. The build dir
 (`.kernelopt/<backend>/build`) is configured against the worktree, so edited
 sources are what gets compiled.

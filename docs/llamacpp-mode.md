@@ -42,18 +42,19 @@ paths), so the pipeline keeps its own build under `.kernelopt/llamacpp/`:
 └── build/        # CMake build dir, configured from the worktree
 ```
 
-`run-llamacpp` reuses the generic `cuda_compile` (CMake) and `cuda_diff`
-commands; `llama_verify`/`llama_bench`/`llama_ncu` implement the gates.
+`run-llamacpp` builds with the shared CMake path and diffs via `src/git.rs`; the
+gates run `test-backend-ops` and `ncu` directly from `src/exec.rs`, with output
+parsed in `src/parse.rs` (the old `llama_*` Python commands are gone).
 
 ## 3. Gate cascade
 
-1. **V_stat** — `cuda_compile` builds `ggml-cuda` + `test-backend-ops` (nvcc/gcc
+1. **V_stat** — cmake builds `ggml-cuda` + `test-backend-ops` (nvcc/gcc
    diagnostics fed back to the Executor).
-2. **V_corr** — `llama_verify` runs `test-backend-ops test -o <OP> -b CUDA0`;
+2. **V_corr** — `test-backend-ops test -o <OP> -b CUDA0`;
    `N/M tests passed` plus per-case FAIL lines are the verdict.
 3. **V_model** — not wired in v1 (would need a GGUF and `llama-bench`).
-4. **V_perf** — `llama_bench` runs `test-backend-ops perf -o <OP> -b CUDA0` and
-   parses `N runs - T us/run`; the median across cases must be ≤ γ × baseline.
+4. **V_perf** — `test-backend-ops perf -o <OP> -b CUDA0`; parses
+   `N runs - T us/run`; the median across cases must be ≤ γ × baseline.
 
 Correctness-only ops (`perf = false`) pass Gate 2 and are reported as `matched`
 (no timing gate).
