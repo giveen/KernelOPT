@@ -117,6 +117,24 @@ def test_parse_bench_stdout_fallback():
     assert parsed["rows"][0]["effective_gbs"] == 3821.5
 
 
+def test_parse_bench_stdout_extracts_roofline():
+    parsed = ninfer.parse_bench_stdout(ADD_BIAS_STDOUT)
+    assert parsed["rows"][0]["roofline_gbs"] == pytest.approx(1792.0)
+
+
+def test_merge_bench_runs_carries_bandwidth():
+    runs = [
+        {
+            "rows": [
+                {"median_us": 10.0, "label": "a", "effective_gbs": 600.0, "roofline_gbs": 1792.0}
+            ]
+        }
+    ]
+    m = ninfer._merge_bench_runs(runs)
+    assert m["representative_gbs"] == pytest.approx(600.0)
+    assert m["representative_roofline_gbs"] == pytest.approx(1792.0)
+
+
 def test_merge_bench_runs_uses_slowest_shape_and_noise():
     import statistics
 

@@ -69,6 +69,10 @@ pub struct CudaPipeline<'a> {
     pub last_bench_noise_pct: Option<f64>,
     /// Label of the shape used for the representative measurement.
     pub last_bench_label: Option<String>,
+    /// Effective bandwidth (GB/s) of the most recent bench's representative shape.
+    pub last_bench_gbs: Option<f64>,
+    /// Device memory roofline (GB/s) reported by the most recent bench.
+    pub last_bench_roofline_gbs: Option<f64>,
     pub memory: &'a mut ExperienceMemory,
     pub tracker: &'a mut StrategyTracker,
     // ---- loop policy ----
@@ -470,6 +474,8 @@ impl<'a> CudaPipeline<'a> {
         }
         self.last_bench_noise_pct = resp["noise_pct"].as_f64();
         self.last_bench_label = resp["representative_label"].as_str().map(|s| s.to_string());
+        self.last_bench_gbs = resp["representative_gbs"].as_f64();
+        self.last_bench_roofline_gbs = resp["representative_roofline_gbs"].as_f64();
         // Use the slowest shape's median (least launch-overhead-dominated), not
         // the median across a heterogeneous shape sweep.
         let median_us = resp["representative_us"]
@@ -1393,6 +1399,8 @@ impl<'a> CudaPipeline<'a> {
         let mut baseline_final_ms = baseline_ms;
         let mut wins = 0u32;
         let mut rounds = 0u32;
+        let mut cand_gbs: Option<f64> = None;
+        let mut cand_roofline_gbs: Option<f64> = None;
         let final_ms = if gate1_2 && self.target.timing {
             let base_ref = self.base_sha.clone().unwrap_or_else(|| "HEAD".to_string());
             let mut bases: Vec<f64> = Vec::new();
@@ -1404,6 +1412,8 @@ impl<'a> CudaPipeline<'a> {
                 self.materialize_winner(&best)?;
                 let _ = self.compile_now()?;
                 let c = self.bench(None)?;
+                cand_gbs = self.last_bench_gbs;
+                cand_roofline_gbs = self.last_bench_roofline_gbs;
                 if c < b {
                     wins += 1;
                 }
@@ -1460,6 +1470,9 @@ impl<'a> CudaPipeline<'a> {
             rounds,
             wins,
             self.cfg.hyper.gamma,
+            cand_gbs,
+            cand_roofline_gbs,
+            MAX_ROOFLINE_RATIO,
         );
         let gate4 = !self.target.timing || verdict.gate4;
         let speedup = final_ms.map(|_| verdict.speedup);
@@ -1486,6 +1499,10 @@ impl<'a> CudaPipeline<'a> {
                           "gamma": self.cfg.hyper.gamma,
                           "noise_pct": self.last_bench_noise_pct,
                           "shape": self.last_bench_label,
+                          "cand_gbs": cand_gbs,
+                          "roofline_gbs": cand_roofline_gbs,
+                          "roofline_ratio": verdict.roofline_ratio,
+                          "plausible": verdict.plausible,
                           "runs": 3,
                           "rounds": rounds,
                           "wins": wins},
@@ -1498,24 +1515,35 @@ impl<'a> CudaPipeline<'a> {
             }),
         })?;
 
-        let (outcome, root_cause) = if passed {
+        let (outcome, root_cause): (&str, Option<String>) = if !verdict.plausible {
+            (
+                "fallback",
+                Some(format!(
+                    "implausibly fast: candidate moves {:.0}% of the memory roofline (>{}x) — it likely \
+                     performs less work than the baseline, and the correctness suite may not cover the \
+                     measured shape (baseline preserved)",
+                    100.0 * verdict.roofline_ratio,
+                    MAX_ROOFLINE_RATIO,
+                )),
+            )
+        } else if passed {
             if !self.target.timing || verdict.optimized {
                 ("optimized", None)
             } else {
                 ("matched", None)
             }
         } else if !gate1_2 {
-            ("fallback", Some("winner failed to rebuild/re-test (baseline preserved)"))
+            ("fallback", Some("winner failed to rebuild/re-test (baseline preserved)".into()))
         } else if !gate4 {
-            ("fallback", Some("winner did not beat the perf gate γ (baseline preserved)"))
+            ("fallback", Some("winner did not beat the perf gate γ (baseline preserved)".into()))
         } else {
-            ("fallback", Some("whole-engine gate rejected the winner (baseline preserved)"))
+            ("fallback", Some("whole-engine gate rejected the winner (baseline preserved)".into()))
         };
 
         self.journal.record(&Event::RunFinished {
             outcome: outcome.into(),
             speedup,
-            root_cause: root_cause.map(|s| s.to_string()),
+            root_cause: root_cause.clone(),
         })?;
         self.clear_checkpoint();
         let summary = json!({
@@ -1545,6 +1573,10 @@ impl<'a> CudaPipeline<'a> {
                 "speedup": speedup,
                 "noise_pct": noise,
                 "within_noise": within_noise,
+                "cand_gbs": cand_gbs,
+                "roofline_gbs": cand_roofline_gbs,
+                "roofline_ratio": verdict.roofline_ratio,
+                "plausible": verdict.plausible,
                 "note": "op-level bench; interleaved fresh baseline/candidate, 3 repeats each; not an end-to-end model speedup",
             }),
         });
@@ -1558,7 +1590,7 @@ impl<'a> CudaPipeline<'a> {
             llm_calls: self.llm_calls,
             tokens: self.tokens,
             diff_path: Some(diff_path.to_string_lossy().to_string()),
-            root_cause: root_cause.map(|s| s.to_string()),
+            root_cause,
             paused: false,
             summary: Some(summary),
         })
@@ -1959,10 +1991,17 @@ fn engine_gate(base: &E2eResult, cand: &E2eResult, gamma: f64) -> (bool, serde_j
     )
 }
 
+/// A memory-bound kernel cannot move data faster than the device's memory
+/// roofline. A candidate that appears to exceed it by more than this factor is
+/// almost certainly doing less work than the baseline (e.g. skipping part of
+/// the tensor), which the correctness suite may not cover at the measured
+/// shape. This turns "impossibly fast" into a rejected win instead of a fake one.
+const MAX_ROOFLINE_RATIO: f64 = 3.0;
+
 /// Gate-4 performance verdict. Pure so it can be unit-tested as a
 /// positive/negative control: it must report `optimized` only for a real,
 /// repeatable improvement that clears both the noise floor and the configured
-/// minimum effect, and wins every interleaved round.
+/// minimum effect, wins every interleaved round, and is physically plausible.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PerfVerdict {
     /// Candidate is not slower than `gamma * baseline`.
@@ -1971,12 +2010,17 @@ pub struct PerfVerdict {
     pub optimized: bool,
     /// Measured improvement is within the measurement noise floor.
     pub within_noise: bool,
+    /// Candidate's effective bandwidth is within the plausible roofline ceiling.
+    pub plausible: bool,
     /// `baseline/final - 1` (0 when there is no timing).
     pub improvement: f64,
     /// `baseline/final` (1.0 when there is no timing).
     pub speedup: f64,
+    /// Candidate effective GB/s / roofline GB/s (1.0 when unknown).
+    pub roofline_ratio: f64,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn performance_verdict(
     baseline_ms: f64,
     final_ms: Option<f64>,
@@ -1985,6 +2029,9 @@ pub fn performance_verdict(
     rounds: u32,
     wins: u32,
     gamma: f64,
+    cand_gbs: Option<f64>,
+    roofline_gbs: Option<f64>,
+    max_roofline_ratio: f64,
 ) -> PerfVerdict {
     let speedup = final_ms
         .map(|m| if m > 0.0 { baseline_ms / m } else { 1.0 })
@@ -1995,13 +2042,20 @@ pub fn performance_verdict(
     let gate4 = final_ms.map(|m| m <= baseline_ms * gamma).unwrap_or(false);
     let within_noise = improvement <= noise_pct;
     let won_all = rounds == 0 || wins == rounds;
-    let optimized = gate4 && improvement > min_improvement && !within_noise && won_all;
+    let roofline_ratio = match (cand_gbs, roofline_gbs) {
+        (Some(c), Some(r)) if r > 0.0 => c / r,
+        _ => 1.0,
+    };
+    let plausible = roofline_ratio <= max_roofline_ratio;
+    let optimized = gate4 && improvement > min_improvement && !within_noise && won_all && plausible;
     PerfVerdict {
         gate4,
         optimized,
         within_noise,
+        plausible,
         improvement,
         speedup,
+        roofline_ratio,
     }
 }
 
@@ -2128,9 +2182,9 @@ mod tests {
     #[test]
     fn perf_verdict_reports_a_real_win() {
         // 30% faster, above the 1% noise floor, wins both interleaved rounds.
-        let v = performance_verdict(1.0, Some(0.70), 0.01, 0.01, 2, 2, 1.05);
+        let v = performance_verdict(1.0, Some(0.70), 0.01, 0.01, 2, 2, 1.05, None, None, 2.5);
         assert!(v.optimized, "expected optimized: {v:?}");
-        assert!(v.gate4 && !v.within_noise);
+        assert!(v.gate4 && !v.within_noise && v.plausible);
         assert!((v.speedup - 1.4286).abs() < 1e-3, "{v:?}");
         assert!((v.improvement - 0.4286).abs() < 1e-3, "{v:?}");
     }
@@ -2138,29 +2192,50 @@ mod tests {
     #[test]
     fn perf_verdict_rejects_correct_but_not_faster() {
         // A correct change that does not beat the baseline => matched, not optimized.
-        let v = performance_verdict(1.0, Some(1.0), 0.01, 0.01, 2, 0, 1.05);
+        let v = performance_verdict(1.0, Some(1.0), 0.01, 0.01, 2, 0, 1.05, None, None, 2.5);
         assert!(!v.optimized && v.within_noise);
         assert!(v.gate4);
         // 0.5% faster, but inside the 1% noise floor => matched.
-        let v = performance_verdict(1.0, Some(0.995), 0.01, 0.01, 2, 2, 1.05);
+        let v = performance_verdict(1.0, Some(0.995), 0.01, 0.01, 2, 2, 1.05, None, None, 2.5);
         assert!(!v.optimized && v.within_noise);
     }
 
     #[test]
     fn perf_verdict_rejects_unstable_or_slow_wins() {
         // 20% faster on the median but only won 1 of 2 rounds => matched.
-        let v = performance_verdict(1.0, Some(0.80), 0.01, 0.01, 2, 1, 1.05);
+        let v = performance_verdict(1.0, Some(0.80), 0.01, 0.01, 2, 1, 1.05, None, None, 2.5);
         assert!(!v.optimized, "unstable win must not count: {v:?}");
         // Slower than gamma*baseline => gate4 fails (=> fallback).
-        let v = performance_verdict(1.0, Some(1.10), 0.01, 0.01, 2, 0, 1.05);
+        let v = performance_verdict(1.0, Some(1.10), 0.01, 0.01, 2, 0, 1.05, None, None, 2.5);
         assert!(!v.gate4 && !v.optimized);
     }
 
     #[test]
     fn perf_verdict_without_timing_is_not_optimized() {
         // correctness-only targets: gate4 is overridden by !timing in finalize.
-        let v = performance_verdict(1.0, None, 0.0, 0.01, 0, 0, 1.05);
+        let v = performance_verdict(1.0, None, 0.0, 0.01, 0, 0, 1.05, None, None, 2.5);
         assert!(!v.optimized && !v.gate4);
         assert_eq!(v.speedup, 1.0);
+    }
+
+    #[test]
+    fn perf_verdict_rejects_implausibly_fast_candidate() {
+        // Reproduces a real false positive: a candidate that skipped part of the
+        // tensor looked 22x faster and reported 14 TB/s against a 1.8 TB/s
+        // roofline (~780%). That is physically impossible, so it must be rejected
+        // even though it cleared every other check.
+        let v = performance_verdict(
+            0.1125, Some(0.00497), 0.012, 0.01, 2, 2, 1.05,
+            Some(14_000.0), Some(1_792.0), 3.0,
+        );
+        assert!(!v.plausible, "{v:?}");
+        assert!(!v.optimized, "implausible win must not be optimized: {v:?}");
+        assert!(v.roofline_ratio > 7.0, "{v:?}");
+        // A genuine vectorization that reaches the roofline stays plausible.
+        let ok = performance_verdict(
+            0.1125, Some(0.070), 0.012, 0.01, 2, 2, 1.05,
+            Some(1_500.0), Some(1_792.0), 3.0,
+        );
+        assert!(ok.plausible && ok.optimized, "{ok:?}");
     }
 }

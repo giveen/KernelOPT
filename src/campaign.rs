@@ -387,6 +387,8 @@ fn run_one_target(
         base_sha: None,
         last_bench_noise_pct: None,
         last_bench_label: None,
+        last_bench_gbs: None,
+        last_bench_roofline_gbs: None,
         memory,
         tracker,
         patience: opts.patience,

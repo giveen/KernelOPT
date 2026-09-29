@@ -428,6 +428,8 @@ def cuda_verify(request: dict) -> dict:
 
 _MEDIAN_STDOUT_RE = re.compile(r"median\s*=\s*([0-9.]+)\s*us", re.IGNORECASE)
 _GBS_STDOUT_RE = re.compile(r"([0-9.]+)\s*GB/s", re.IGNORECASE)
+# "… 1667.7 GB/s  (93.1% of 1792 GB/s roofline)"
+_ROOFLINE_STDOUT_RE = re.compile(r"of\s+([0-9.]+)\s*GB/s\s+roofline", re.IGNORECASE)
 
 
 def parse_bench_csv(text: str) -> dict:
@@ -473,6 +475,9 @@ def parse_bench_stdout(text: str) -> dict:
         g = _GBS_STDOUT_RE.search(line)
         if g:
             row["effective_gbs"] = float(g.group(1))
+        r = _ROOFLINE_STDOUT_RE.search(line)
+        if r:
+            row["roofline_gbs"] = float(r.group(1))
         rows.append(row)
     medians = [r["median_us"] for r in rows]
     return {
@@ -628,6 +633,11 @@ def _merge_bench_runs(runs: list[dict], shape_filter: str | None = None) -> dict
             "label": runs[0]["rows"][i].get("label"),
             "line": runs[0]["rows"][i].get("line"),
         }
+        for key in ("effective_gbs", "roofline_gbs"):
+            samples = [r["rows"][i].get(key) for r in runs]
+            samples = [v for v in samples if isinstance(v, (int, float))]
+            if samples:
+                row[key] = statistics.median(samples)
         if med and med > 0:
             spreads.append((max(vals) - min(vals)) / med)
         rows.append(row)
@@ -646,6 +656,8 @@ def _merge_bench_runs(runs: list[dict], shape_filter: str | None = None) -> dict
         "representative_us": (representative or {}).get("median_us"),
         "representative_label": (representative or {}).get("label"),
         "representative_samples": (representative or {}).get("samples"),
+        "representative_gbs": (representative or {}).get("effective_gbs"),
+        "representative_roofline_gbs": (representative or {}).get("roofline_gbs"),
         "noise_pct": statistics.median(spreads) if spreads else None,
     }
 
