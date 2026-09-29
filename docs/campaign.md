@@ -4,7 +4,7 @@ Campaign mode turns KernelOpt from "optimize one kernel" into a long-running,
 resumable loop over **every kernel in a directory**.
 
 ```
-kernelopt campaign --repo <dir> [--mode auto|ninfer|llamacpp] [options]
+kernelopt campaign --repo <dir> [--mode auto|ninfer|llamacpp|custom] [options]
 ```
 
 `--mode auto` detects the backend from repo markers: `src/ops` +

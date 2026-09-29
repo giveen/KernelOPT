@@ -39,21 +39,23 @@ benchmarks anything.
 ### `profile` — rank kernels by real engine share
 
 Answers "what does the engine actually spend time on?" and is **attribution
-only** (never a gate timing).
+only** (never a gate timing). `--engine auto|nsys|ncu|graphsignal` picks the
+backend (`auto` = **nsys → ncu → graphsignal**).
 
-1. Launches `graphsignal-run --listen-port <P> [--cuda-graph-trace node] <cmd>`
-   (provisioning Graphsignal first if needed).
-2. Polls `GET /signals` while the workload runs and keeps the last payload.
-3. Reads the `cuda_kernels_nanoseconds` profile frames (per-kernel cumulative
-   time) and attributes each kernel symbol to a discovered target by matching
-   op/family/variant tokens (most specific first). Unmatched kernels are reported
-   separately.
-4. Prints the ranking (`op`, share %, time, kernels) or `--json`.
+- **nsys** (default): `nsys profile -t cuda` + `nsys stats` — kernels **and
+  memcpy**, CUDA graphs included, no admin counters.
+- **ncu** (fallback): profiles the workload and sums per-kernel `Duration`
+  (kernel-only; needs `NVreg_RmProfilingAdminOnly=0`).
+- **graphsignal**: `graphsignal-run` + `GET /signals` (auto-provisioned; the
+  only backend with ROCm support).
 
-`--cuda-graph-trace node` is what makes per-kernel time appear when the engine
-captures decode into a CUDA graph. `--top` caps how many kernels are considered;
-`--cwd` sets the workload's working directory; `--no-setup` refuses to
-auto-provision. See [graphsignal.md](graphsignal.md).
+Whichever backend, the per-kernel times are attributed to discovered targets by
+matching op/family/variant tokens (most specific first); unmatched kernels are
+reported separately. Prints the ranking (`op`, share %, time, kernels) or `--json`.
+
+`--top` caps how many kernels are considered; `--cwd` sets the workload's working
+directory. `--cuda-graph-trace` / `--no-setup` / `--source` apply to the
+Graphsignal backend only. See [graphsignal.md](graphsignal.md).
 
 ### `campaign` — the self-looping driver
 

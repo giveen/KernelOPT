@@ -1,5 +1,11 @@
 # KernelOpt — Graphsignal integration (engine-share attribution)
 
+> **Optional now.** Engine-share ranking defaults to the NVIDIA suite —
+> **nsys** (`--engine nsys`) or **ncu** (`--engine ncu`) — which needs no
+> Graphsignal fork, venv, or `/signals`. Use `--engine graphsignal` only when you
+> want CUPTI sidecar attribution (e.g. ROCm, or a CUDA graph trace). See
+> [cli.md](cli.md) `profile`.
+
 [Graphsignal](https://github.com/graphsignal/graphsignal) is a GPU profiler that
 observes an inference engine or any GPU process from a sidecar and serves
 everything it measures at `http://127.0.0.1:<port>/signals` as JSON.

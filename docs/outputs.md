@@ -18,7 +18,8 @@ committed to your target repo.
 │   ├── campaign.jsonl     # one line per finished target
 │   ├── memory.json        # experience memory (persisted across resume)
 │   └── tracker.json       # strategy tracker / AVOID flags (persisted)
-├── graphsignal/           # managed profiler venv (see graphsignal.md)
+├── graphsignal/           # managed profiler venv (optional; see graphsignal.md)
+├── nsys/                  # raw Nsight Systems reports (.nsys-rep)
 └── <backend>/{worktree,build}/   # isolated worktree + warm CMake build dir
 ```
 

@@ -39,7 +39,7 @@ never contracts, never wrapper semantics.
 - `git worktree add` into `.kernelopt/ninfer/worktree` at the current HEAD; all edits happen there.
 - One branch per op: `kernelopt/ninfer-<op>` (stable so the separate CMake build dir stays warm —
   Ninja only rebuilds files we actually touch). The user's working tree is never touched.
-- A candidate that survives all four gates is surfaced as a patch (`git diff`) for the user to
+- A candidate that survives all five gates is surfaced as a patch (`git diff`) for the user to
   accept — KernelOpt does not commit to the user's tree, matching "compiler baseline preserved."
 - Teardown resets the worktree (discarding candidate edits) but leaves it and the build dir in
   place for the next run; delete `.kernelopt/ninfer/` to reclaim disk. Concurrent runs on the
@@ -189,7 +189,7 @@ time on, not what looks slow in isolation.
 ## 9. Verification of the tool itself
 
 > **Status (implemented):**
-> - `discover` — `kernelopt discover --repo <dir> [--mode auto|ninfer|llamacpp] [--op <token>|--list]`
+> - `discover` — `kernelopt discover --repo <dir> [--mode auto|ninfer|llamacpp|custom] [--op <token>|--list]`
 >   (`src/ninfer.rs`, `src/llamacpp.rs`; fixture unit tests + read-only `tests/discover_real.rs`).
 > - Runner commands (`runner/kernelopt_runner/ninfer.py`, `llamacpp.py`): `cuda_worktree`,
 >   `cuda_compile`, `cuda_verify`, `cuda_bench`, `cuda_ncu`, `cuda_engine_bench`, `cuda_diff`,
