@@ -1472,7 +1472,7 @@ impl<'a> CudaPipeline<'a> {
             self.cfg.hyper.gamma,
             cand_gbs,
             cand_roofline_gbs,
-            MAX_ROOFLINE_RATIO,
+            DEFAULT_MAX_ROOFLINE_RATIO,
         );
         let gate4 = !self.target.timing || verdict.gate4;
         let speedup = final_ms.map(|_| verdict.speedup);
@@ -1523,7 +1523,7 @@ impl<'a> CudaPipeline<'a> {
                      performs less work than the baseline, and the correctness suite may not cover the \
                      measured shape (baseline preserved)",
                     100.0 * verdict.roofline_ratio,
-                    MAX_ROOFLINE_RATIO,
+                    DEFAULT_MAX_ROOFLINE_RATIO,
                 )),
             )
         } else if passed {
@@ -2000,11 +2000,11 @@ fn engine_gate(base: &E2eResult, cand: &E2eResult, gamma: f64) -> (bool, serde_j
 }
 
 /// A memory-bound kernel cannot move data faster than the device's memory
-/// roofline. A candidate that appears to exceed it by more than this factor is
-/// almost certainly doing less work than the baseline (e.g. skipping part of
-/// the tensor), which the correctness suite may not cover at the measured
-/// shape. This turns "impossibly fast" into a rejected win instead of a fake one.
-const MAX_ROOFLINE_RATIO: f64 = 3.0;
+/// roofline — but an L2-resident working set legitimately can (the bench reuses
+/// the same buffers). This ceiling is deliberately generous so a real cache-fed
+/// win is not rejected; a candidate that *skips work* shows a far larger ratio
+/// (the false positive that motivated this check was ~7.8x).
+const DEFAULT_MAX_ROOFLINE_RATIO: f64 = 4.0;
 
 /// Gate-4 performance verdict. Pure so it can be unit-tested as a
 /// positive/negative control: it must report `optimized` only for a real,
@@ -2234,7 +2234,7 @@ mod tests {
         // even though it cleared every other check.
         let v = performance_verdict(
             0.1125, Some(0.00497), 0.012, 0.01, 2, 2, 1.05,
-            Some(14_000.0), Some(1_792.0), 3.0,
+            Some(14_000.0), Some(1_792.0), 4.0,
         );
         assert!(!v.plausible, "{v:?}");
         assert!(!v.optimized, "implausible win must not be optimized: {v:?}");
@@ -2242,8 +2242,15 @@ mod tests {
         // A genuine vectorization that reaches the roofline stays plausible.
         let ok = performance_verdict(
             0.1125, Some(0.070), 0.012, 0.01, 2, 2, 1.05,
-            Some(1_500.0), Some(1_792.0), 3.0,
+            Some(1_500.0), Some(1_792.0), 4.0,
         );
         assert!(ok.plausible && ok.optimized, "{ok:?}");
+        // A real L2-fed win measured at ~2.9x the DRAM roofline must stay
+        // plausible (it was verified correct at the measured shape).
+        let l2 = performance_verdict(
+            0.1127, Some(0.0134), 0.007, 0.01, 2, 2, 1.05,
+            Some(5_256.0), Some(1_792.0), 4.0,
+        );
+        assert!(l2.plausible && l2.optimized, "{l2:?}");
     }
 }
