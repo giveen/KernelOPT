@@ -158,6 +158,7 @@ fn build_target(cuda: &Path, op: &str, perf: bool, stems: &[&str]) -> Option<Tar
         timing: perf,
         warnings,
         configure_args: crate::backend::llamacpp_configure_args(),
+        build_cmd: None,
         test_cmd: None,
         bench_cmd: None,
         bench_format: None,

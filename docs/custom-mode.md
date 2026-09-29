@@ -32,7 +32,19 @@ bench_format = "csv"                             # csv | stdout | llama
 timing = true                                    # false => correctness-only
 ```
 
-Placeholders: `{repo}`, `{build}`, `{csv}`.
+Placeholders: `{repo}` (the worktree, i.e. the candidate checkout), `{build}`, `{csv}`.
+
+### Non-CMake projects
+
+Set `build_cmd` (at `[project]` level for all targets, or per-target) to replace
+the CMake configure+build — e.g. Make, Ninja, Bazel, or a HIP/ROCm build:
+
+```toml
+[project]
+build_cmd = ["make", "-C", "{build}", "-j8"]
+# or per-target:
+# build_cmd = ["hipcc", "-o", "{build}/bench/my_bench", "{repo}/bench/my_bench.cpp"]
+```
 
 ## Using it
 
@@ -58,8 +70,9 @@ noise floor, the sign test, the memory-roofline plausibility guard, and Gate 5
 (measured-shape correctness, when a `run_case`-style test is found).
 
 ## Gates
-- **Gate 1 (build)**: `cmake -S <repo> -B .kernelopt/custom/build <configure_args>`
-  then `cmake --build --target <build_targets>`.
+- **Gate 1 (build)**: your `build_cmd` if set, else CMake:
+  `cmake -S <worktree> -B .kernelopt/custom/build <configure_args>` then
+  `cmake --build --target <build_targets>`.
 - **Gate 2 (correctness)**: your `test_cmd` — exit 0 passes.
 - **Gate 3 (engine E2E)**: optional; pass `--e2e-cmd <your command>`.
 - **Gate 4 (performance)**: your `bench_cmd`, parsed per `bench_format`.

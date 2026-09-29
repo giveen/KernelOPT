@@ -120,6 +120,7 @@ mod tests {
             timing: true,
             warnings: vec![],
             configure_args: vec![],
+            build_cmd: None,
             test_cmd: None,
             bench_cmd: None,
             bench_format: None,

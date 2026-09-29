@@ -38,6 +38,8 @@ struct Project {
     name: Option<String>,
     #[serde(default)]
     configure_args: Vec<String>,
+    #[serde(default)]
+    build_cmd: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +55,8 @@ struct TargetSpec {
     contract_files: Vec<String>,
     #[serde(default)]
     build_targets: Vec<String>,
+    #[serde(default)]
+    build_cmd: Option<Vec<String>>,
     #[serde(default)]
     test_cmd: Option<Vec<String>>,
     #[serde(default)]
@@ -128,6 +132,7 @@ fn to_target(repo: &Path, project: &Project, t: &TargetSpec) -> Result<crate::ba
         timing: t.timing,
         warnings: vec![],
         configure_args,
+        build_cmd: t.build_cmd.clone().or_else(|| project.build_cmd.clone()),
         test_cmd: t.test_cmd.clone(),
         bench_cmd: t.bench_cmd.clone(),
         bench_format: t.bench_format.clone(),
@@ -164,6 +169,7 @@ mod tests {
 [project]
 name = "my-engine"
 configure_args = ["-DMY_TESTS=ON"]
+build_cmd = ["make", "-C", "{build}", "-j8"]
 
 [[target]]
 op = "add_bias"
@@ -185,6 +191,11 @@ bench_format = "csv"
         assert_eq!(t.target_file, "src/ops/add_bias.cu");
         assert_eq!(t.context_files, vec!["src/ops/launcher.cu"]);
         assert_eq!(t.configure_args, vec!["-DMY_TESTS=ON"]);
+        assert_eq!(
+            t.build_cmd.as_ref().unwrap()[0],
+            "make",
+            "project build_cmd propagates"
+        );
         assert!(t.test_cmd.is_some() && t.bench_cmd.is_some());
 
         let argv = expand(

@@ -347,17 +347,22 @@ impl<'a> CudaPipeline<'a> {
             data: json!({"worktree": self.worktree, "head": wt["head"], "reused": wt["reused"]}),
         })?;
 
-        let cfg = crate::exec::build(
-            &self.worktree,
-            &self.build_dir,
-            &self.compile_targets(),
-            true,
-            true,
-            &self.target.configure_args,
-            num_cpus(),
-            3600,
-        )
-        .context("cuda_compile (configure+build)")?;
+        let cfg = if let Some(bc) = &self.target.build_cmd {
+            let argv = crate::custom::expand(bc, &self.worktree, &self.build_dir, None);
+            crate::exec::run_argv(&argv, 3600).context("custom build")?
+        } else {
+            crate::exec::build(
+                &self.worktree,
+                &self.build_dir,
+                &self.compile_targets(),
+                true,
+                true,
+                &self.target.configure_args,
+                num_cpus(),
+                3600,
+            )
+            .context("cuda_compile (configure+build)")?
+        };
         let cfg = crate::parse::compile_view(&cfg);
         self.journal.record(&Event::StageCompleted {
             stage: "compile_baseline".into(),
@@ -460,7 +465,7 @@ impl<'a> CudaPipeline<'a> {
                     let mut last = None;
                     for _ in 0..3 {
                         let argv =
-                            crate::custom::expand(bc, &self.repo, &self.build_dir, Some(&csv));
+                            crate::custom::expand(bc, &self.worktree, &self.build_dir, Some(&csv));
                         let r = crate::exec::run_argv(&argv, 1800)?;
                         last = r["exit_code"].as_i64();
                         let csv_text = std::fs::read_to_string(&csv)
@@ -549,7 +554,7 @@ impl<'a> CudaPipeline<'a> {
                     return self.note_profile("custom target has no `bench_cmd` to profile");
                 };
                 (
-                    crate::custom::expand(bc, &self.repo, &self.build_dir, None),
+                    crate::custom::expand(bc, &self.worktree, &self.build_dir, None),
                     5u32,
                 )
             }
@@ -1828,23 +1833,29 @@ impl<'a> CudaPipeline<'a> {
     // ---------- finalize helpers ----------
 
     fn compile_now(&self) -> Result<serde_json::Value> {
-        let resp = crate::exec::build(
-            &self.worktree,
-            &self.build_dir,
-            &self.compile_targets(),
-            false,
-            false,
-            &[],
-            num_cpus(),
-            3600,
-        )?;
+        let resp = if let Some(bc) = &self.target.build_cmd {
+            // Non-CMake projects declare their own build command.
+            let argv = crate::custom::expand(bc, &self.worktree, &self.build_dir, None);
+            crate::exec::run_argv(&argv, 3600)?
+        } else {
+            crate::exec::build(
+                &self.worktree,
+                &self.build_dir,
+                &self.compile_targets(),
+                false,
+                false,
+                &[],
+                num_cpus(),
+                3600,
+            )?
+        };
         Ok(crate::parse::compile_view(&resp))
     }
 
     fn verify_now(&self) -> Result<serde_json::Value> {
         let _guard = crate::gpu_lock::lock(&self.gpu_lock_path)?;
         let resp = if let Some(tc) = &self.target.test_cmd {
-            let argv = crate::custom::expand(tc, &self.repo, &self.build_dir, None);
+            let argv = crate::custom::expand(tc, &self.worktree, &self.build_dir, None);
             crate::exec::run_argv(&argv, 1800)?
         } else {
             match self.target.backend {

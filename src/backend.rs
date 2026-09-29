@@ -108,6 +108,10 @@ pub struct Target {
     /// their own; built-ins default to `Backend::configure_args`).
     #[serde(default)]
     pub configure_args: Vec<String>,
+    /// Explicit build command (custom, non-CMake). `{repo}`/`{build}` substituted.
+    /// When set it replaces the cmake configure+build.
+    #[serde(default)]
+    pub build_cmd: Option<Vec<String>>,
     /// Explicit Gate-2 command (custom). `{repo}`/`{build}` are substituted.
     #[serde(default)]
     pub test_cmd: Option<Vec<String>>,
