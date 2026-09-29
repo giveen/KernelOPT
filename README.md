@@ -19,29 +19,40 @@ Optimization* (arXiv:2609.30059), extended to CUDA kernel trees.
 ## How it works
 
 ```
-discover ─▶ baseline ─▶ ┌ plan ─▶ edit ─▶ compile ─▶ correctness ─▶ bench ┐ ─▶ γ gate ─▶ diff
+discover ─▶ baseline ─▶ ┌ plan ─▶ edit ─▶ compile ─▶ correctness ─▶ bench ┐ ─▶ γ/roofline gate ─▶ shape gate ─▶ diff
                         └────────── iterate until patience/target/budget ──┘
 ```
 
 LLM agents (Planner → Executor → Summarizer) work with an NCU/Graphsignal-guided
-beam search and shared experience memory. Four gates filter candidates: static
-compile, multi-seed correctness, **model-level (engine) verification**, and a
-performance gate (`≤ γ × baseline`, γ = 1.03). If nothing passes, the baseline is
-preserved.
+beam search and shared experience memory. Five gates filter candidates: static
+compile, multi-seed correctness, **model-level (engine) verification**, a
+performance gate (pinned shape, interleaved fresh baseline/candidate rounds, a
+noise floor and a sign test), and **measured-shape correctness** — the op's own
+suite may not cover the launch path the perf gate measures. A perf win must also
+be *physically plausible*: a candidate that appears to beat the device's memory
+roofline is rejected as "doing less work", not accepted as a win. If nothing
+passes, the baseline is preserved.
 
 The Planner can also pull context on demand (`search_repo`/`read_file`, ripgrep)
-instead of receiving a full file dump, and every candidate that clears Gates 1–2
-is committed and tagged for fast revert. The Executor edits by whole file
-(default) or by unified diff (`--edit-mode patch`, opt-in) to avoid reproduction
-drift; either way the run outputs a reviewable unified diff and your checkout is
-never modified.
+instead of receiving a full file dump, and every accepted candidate (compile +
+correctness + bench) is committed and tagged for fast revert. The Executor edits
+by whole file (default) or by unified diff (`--edit-mode patch`, opt-in) to avoid
+reproduction drift; either way the run outputs a reviewable unified diff and your
+checkout is never modified.
 
 **Measurement rigor:** an op-level speedup is measured on a pinned shape with 3
 repeats, then re-confirmed with interleaved fresh baseline/candidate re-benches
 (`--final-rounds`). A candidate is only called `optimized` if it beats the baseline
-by more than the measured noise *and* wins every round — otherwise it is `matched`.
-The reported number is always explicit (`N×` = baseline/final, with the shape and
-ms values).
+by more than the measured noise, wins every round, is physically plausible
+(below a generous multiple of the memory roofline), and is correct on the
+measured shape; otherwise it is `matched` (correct but not faster) or `fallback`
+(rejected). The reported number is always explicit (`N×` = baseline/final, with
+the shape, ms values, noise, and bandwidth-vs-roofline).
+
+**One GPU job at a time:** bench/verify/NCU/engine-E2E take an exclusive
+cross-process lock (`.kernelopt/gpu.lock`), so a campaign and a single run — or
+two campaigns — serialize on the device instead of corrupting each other's timing
+or VRAM.
 
 ## Requirements
 
@@ -92,12 +103,16 @@ kernelopt profile --mode llamacpp --cuda-graph-trace node \
 Inspect and control a run:
 
 ```bash
-kernelopt watch   --latest           # live progress (the run also streams it itself)
-kernelopt status  <run_id>            # events / candidates / tokens
+kernelopt watch   --latest           # live progress; stops when the run finishes and
+                                     # prints report.md / report.diff / journal paths
+                                     # (--follow to keep tailing, --once to dump and exit)
+kernelopt status  <run_id>            # events / candidates / tokens (--campaign for campaigns)
 kernelopt report  <run_id>            # report + winner: what changed / why faster
 kernelopt history <run_id>            # candidate commits (sha, latency, plan)
 kernelopt revert  <run_id> --to <ref> # reset the worktree to a candidate
 kernelopt analyze <run_id>            # failure taxonomy, retries, tokens, plans, winner
+kernelopt resume  <run_id>            # resume an interrupted run from its journal
+kernelopt eval    <campaign_id>       # self-benchmark: win rate, speedups, cost
 ```
 
 Providers: `opencode-go` (default), `openai`, `openrouter`, `ollama`, `vllm`,
@@ -162,6 +177,10 @@ Tests needing a repo/build skip when the env vars are unset.
   `fallback` with the cause in `report.md`.
 - **Cold first build is slow** — the worktree build is configured once, then
   reused per op. Delete `.kernelopt/<backend>/` to reclaim disk.
+- **A run pauses before benching** — another `kernelopt` process holds the GPU
+  lock (`.kernelopt/gpu.lock`). Bench/verify/NCU/E2E serialize on it so the device
+  only runs one job; wait for the other run, or remove a stale lockfile if no
+  process is using it.
 
 ## Repository layout
 
@@ -177,6 +196,7 @@ src/
   tools.rs           Planner retrieval (ripgrep search / bounded reads)
   signals.rs         /signals summarizer      analyst.rs   NCU bottleneck tier
   dotenv.rs          .env loader             memory.rs    experience memory
+  journal.rs         append-only run log      gpu_lock.rs  cross-process GPU lock
 runner/kernelopt_runner/   Python runner (cuda_*, llama_*, graphsignal_*, engine_*)
 prompts/                   agent prompts
 docs/                      this directory
