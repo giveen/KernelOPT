@@ -1,0 +1,38 @@
+KernelOPT
+Copyright 2026 giveen
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this work except in compliance with the License. You may obtain a copy of the
+License in the LICENSE file or at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied.
+
+--------------------------------------------------------------------------------
+Third-party components
+
+This product optionally uses, but does not bundle, the following third-party
+software. Their licenses apply to their respective works:
+
+- Graphsignal — GPU profiler for AI agents (https://github.com/graphsignal/graphsignal),
+  Apache License 2.0. KernelOPT integrates it as an external sidecar (launched via
+  `graphsignal-run`) and reads its local `/signals` JSON API. The llama.cpp/NInfer
+  launchers used by KernelOPT live in the fork at
+  https://github.com/giveen/graphsignal (also Apache License 2.0). No Graphsignal
+  source is included in this repository; the profiler is provisioned separately
+  into a managed virtual environment.
+
+- Rust crate dependencies (anyhow, clap, serde, serde_json, toml, chrono, uuid,
+  reqwest, ctrlc, and their transitive dependencies) are distributed under
+  permissive licenses (MIT and/or Apache-2.0). See Cargo.lock and each crate for
+  the exact terms.
+
+- The ninfer and llama.cpp source trees are optimization *targets*, not part of
+  this work, and are not included here.
+
+This project is an independent implementation of the method described in
+"KernelOPT: Dispatch-Aware Agentic Search for GPU Kernel Optimization"
+(arXiv:2609.30059). The paper is a separate work and is not included here.
