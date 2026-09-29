@@ -69,7 +69,7 @@ or VRAM.
 cargo build --release        # binary: target/release/kernelopt
 ```
 
-## Quick start
+## Setup
 
 ```bash
 cp .env.example .env     # set NINFER_REPO / LLAMACPP_REPO / KERNELOPT_MODEL / OPENCODE_API_KEY
@@ -79,28 +79,77 @@ cp .env.example .env     # set NINFER_REPO / LLAMACPP_REPO / KERNELOPT_MODEL / O
 are optional. If you pass `--repo "$NINFER_REPO"`, export it first
 (`set -a; source .env; set +a`) — otherwise the shell expands it to empty.
 
-```bash
-# Compiled PyTorch model
-kernelopt run examples/mlp.py
+## Examples
 
-# ninfer Op (smallest kernel; good first run) — --watch = one-terminal live view
+### One kernel
+
+```bash
+# Compiled PyTorch model (Triton kernels)
+kernelopt run examples/mlp.py
+kernelopt run examples/pointwise_fused.py
+
+# ninfer Op — smallest kernel, good first run. --watch = one-terminal live view
 kernelopt run-ninfer --op add_bias --iterations 3 --beam 2 --retries 3 --watch
 
 # llama.cpp ggml-cuda kernel
-kernelopt run-llamacpp --op SOFT_MAX
-
-# Point at a directory and keep optimizing (resumable)
-kernelopt campaign --mode ninfer --patience 3 --target-speedup 1.15 --budget-hours 8 --watch
-
-# What's optimizable here?
-kernelopt discover --list
-
-# What does the engine actually spend time on?
-kernelopt profile --mode llamacpp --cuda-graph-trace node \
-    --cmd "$LLAMACPP_REPO/build/bin/test-backend-ops" perf -o SOFT_MAX -b CUDA0
+kernelopt run-llamacpp --op SOFT_MAX --iterations 3 --beam 2 --watch
 ```
 
-Inspect and control a run:
+Every run prints a `run id` and writes `report.md` + `report.diff` under
+`.kernelopt/runs/<run_id>/`. `--watch` shows progress in the same terminal and
+prints those paths when the run finishes.
+
+### Measure harder, or pin the shape
+
+```bash
+# Gate 4 measures the slowest shape by default; pin one and add a final round
+kernelopt run-ninfer --op add_bias --bench-shape "4304,4096" --final-rounds 3 --watch
+
+# Executor submits a unified diff instead of the whole file (opt-in)
+kernelopt run-ninfer --op add_bias --edit-mode patch --watch
+```
+
+### Whole-engine (model-level) verification
+
+```bash
+# Gate 3: the candidate must produce the same tokens and not be slower, end to end
+kernelopt run-ninfer --op bf16_linear_add --e2e-weights /path/to/model.ninfer --watch
+kernelopt run-llamacpp --op SOFT_MAX --e2e-weights /path/to/model.gguf --watch
+```
+
+`--e2e-cmd` / `--profile-cmd` consume the rest of the argv — put them **last**.
+
+### Sweep a directory (campaign)
+
+```bash
+# Discover + optimize every target; stop after 8h or 3 stalled targets
+kernelopt campaign --mode ninfer --patience 3 --target-speedup 1.15 \
+    --budget-hours 8 --max-iterations 4 --watch
+
+# Restrict to specific ops (--op is repeatable) / resume a previous campaign
+kernelopt campaign --mode ninfer --op add_bias --op gelu --watch
+kernelopt campaign --mode ninfer --resume 20260929_063819_ninfer --watch
+```
+
+`Ctrl-C` pauses gracefully; `--watch` shows the campaign status, and
+`kernelopt status <id> --campaign` re-checks later.
+
+### Discover and profile
+
+```bash
+# What's optimizable here? (one target, or every target)
+kernelopt discover --list
+kernelopt discover --op add_bias
+
+# Rank kernels by real engine share (Graphsignal; attribution only)
+kernelopt profile --mode llamacpp --cuda-graph-trace node \
+    --cmd "$LLAMACPP_REPO/build/bin/test-backend-ops" perf -o SOFT_MAX -b CUDA0
+
+# Provision the profiler into .kernelopt/graphsignal/venv (idempotent)
+kernelopt setup-graphsignal
+```
+
+### Inspect and control a run
 
 ```bash
 kernelopt watch   --latest           # live progress; stops when the run finishes and
