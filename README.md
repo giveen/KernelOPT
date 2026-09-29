@@ -2,24 +2,26 @@
 
 Dispatch-aware, agentic GPU-kernel optimization. Point KernelOPT at a **single
 kernel, a directory of kernels, or a whole model** — Triton kernels in a compiled
-PyTorch model, a CUDA op in ninfer, a ggml-cuda kernel in llama.cpp, or **any CUDA
-repo** that declares its build/test/bench in `kernelopt.toml`. It profiles them
-and drives a profile → plan → edit → verify → gate loop until each is faster — or
-a budget runs out. Your working tree is never touched: edits happen in an isolated
-git worktree, every accepted candidate is **committed and tagged** (so it can be
-read or reverted instantly), and the winner is handed back as a unified diff.
+PyTorch model, a CUDA op in ninfer, a ggml-cuda kernel in llama.cpp, or **any
+CMake-based GPU repo (CUDA or HIP/ROCm)** that declares its build/test/bench in
+`kernelopt.toml`. It profiles them and drives a profile → plan → edit → verify →
+gate loop until each is faster — or a budget runs out. Your working tree is never
+touched: edits happen in an isolated git worktree, every accepted candidate is
+**committed and tagged** (so it can be read or reverted instantly), and the winner
+is handed back as a unified diff.
 
 An implementation of *KernelOPT: Dispatch-Aware Agentic Search for GPU Kernel
 Optimization* (arXiv:2609.30059), extended from its Triton/Inductor setting to
-CUDA kernel trees (ninfer, llama.cpp) and a generic descriptor-driven CUDA
-backend, with NVIDIA-suite profiling (nsys/ncu) for engine-share ranking.
+CUDA kernel trees (ninfer, llama.cpp) and a generic descriptor-driven backend
+(CUDA and HIP/ROCm), with engine-share ranking via the NVIDIA suite (nsys/ncu) or
+Graphsignal (CUDA or ROCm).
 
 | Mode | Target tree | Optimization unit | Correctness | Timing |
 |---|---|---|---|---|
 | `triton` | compiled PyTorch model | one Inductor `@triton.jit` kernel | eager PyTorch + `allclose` | `triton.testing.do_bench` |
 | `ninfer` | ninfer checkout | one `src/ops/<family>/<impl>/*.cu` | the Op's own `ctest` suite | `ninfer_<op>_bench` |
 | `llamacpp` | llama.cpp checkout | one `ggml/src/ggml-cuda/*.cu` | `test-backend-ops test -o <OP>` | `test-backend-ops perf -o <OP>` |
-| `custom` | any CUDA repo with `kernelopt.toml` | a file you declare | your `test_cmd` | your `bench_cmd` |
+| `custom` | any CMake GPU repo (CUDA or HIP/ROCm) with `kernelopt.toml` | a file you declare | your `test_cmd` | your `bench_cmd` |
 
 ## How it works
 

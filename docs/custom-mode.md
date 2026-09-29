@@ -1,8 +1,12 @@
 # KernelOpt — custom mode (any CUDA repo)
 
 `ninfer` and `llama.cpp` are just built-in presets. **custom** mode optimizes
-*any* CUDA kernel repo that declares how to build, test, and bench itself — no
-KernelOPT code changes.
+*any* CMake-based GPU kernel repo — **CUDA or HIP/ROCm** — that declares how to
+build, test, and bench itself. No KernelOPT code changes.
+
+> **Profiling:** engine-share ranking uses `nsys`/`ncu` (NVIDIA). On ROCm use
+> `--engine graphsignal` (its ROCm path); the build/test/bench gates are
+> toolchain-agnostic (cmake + your commands).
 
 ## `kernelopt.toml` (repo root)
 
