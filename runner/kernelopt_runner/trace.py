@@ -24,9 +24,6 @@ EXTERN_PATTERN = re.compile(
 TRITON_KERNEL_PATTERN = re.compile(r"@triton\.jit\s*\ndef\s+(\w+)\s*\(")
 TRITON_LAUNCH_PATTERN = re.compile(r"(\w+)\.run\(")
 
-# torch 2.x puts Inductor output here when TORCH_COMPILE_DEBUG=1
-_DEBUG_SUBDIRS = ("torch_compile_debug", "run_*", "torchinductor_*")
-
 
 def _find_inductor_output(debug_dir: str) -> str | None:
     for root, _dirs, files in os.walk(debug_dir):
