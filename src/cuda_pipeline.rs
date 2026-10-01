@@ -513,7 +513,17 @@ impl<'a> CudaPipeline<'a> {
         })
     }
 
+    /// Representative-shape median in ms (the Gate-4 number).
     fn bench(&mut self, source: Option<&str>) -> Result<f64> {
+        let merged = self.bench_merged(source)?;
+        Ok(merged
+            .representative_us
+            .context("bench returned no representative_us")?
+            / 1000.0)
+    }
+
+    /// Full merged bench over every shape — feeds the cross-shape regression gate.
+    fn bench_merged(&mut self, source: Option<&str>) -> Result<crate::parse::MergedBench> {
         if let Some(src) = source {
             std::fs::write(self.target_path(), src).context("writing kernel into worktree")?;
         }
@@ -623,10 +633,7 @@ impl<'a> CudaPipeline<'a> {
         self.last_bench_label = merged.representative_label.clone();
         self.last_bench_gbs = merged.representative_gbs;
         self.last_bench_roofline_gbs = merged.representative_roofline_gbs;
-        let median_us = merged
-            .representative_us
-            .context("bench returned no representative_us")?;
-        Ok(median_us / 1000.0)
+        Ok(merged)
     }
 
     pub fn stage_profile(&mut self) -> Option<serde_json::Value> {
@@ -1678,6 +1685,9 @@ impl<'a> CudaPipeline<'a> {
         let mut rounds = 0u32;
         let mut cand_gbs: Option<f64> = None;
         let mut cand_roofline_gbs: Option<f64> = None;
+        // Per-shape rows across rounds, for the cross-shape regression gate.
+        let mut base_merged: Vec<crate::parse::MergedBench> = Vec::new();
+        let mut cand_merged: Vec<crate::parse::MergedBench> = Vec::new();
         let final_ms = if gate1_2 && self.target.timing {
             let base_ref = self.base_sha.clone().unwrap_or_else(|| "HEAD".to_string());
             let mut bases: Vec<f64> = Vec::new();
@@ -1685,17 +1695,21 @@ impl<'a> CudaPipeline<'a> {
             for _ in 0..self.final_rounds.max(1) {
                 self.revert_ref(&base_ref)?;
                 let _ = self.compile_now()?;
-                let b = self.bench(None)?;
+                let bm = self.bench_merged(None)?;
                 self.materialize_winner(&best)?;
                 let _ = self.compile_now()?;
-                let c = self.bench(None)?;
+                let cm = self.bench_merged(None)?;
                 cand_gbs = self.last_bench_gbs;
                 cand_roofline_gbs = self.last_bench_roofline_gbs;
+                let b = bm.representative_us.unwrap_or(0.0) / 1000.0;
+                let c = cm.representative_us.unwrap_or(0.0) / 1000.0;
                 if c < b {
                     wins += 1;
                 }
                 bases.push(b);
                 cands.push(c);
+                base_merged.push(bm);
+                cand_merged.push(cm);
             }
             rounds = bases.len() as u32;
             baseline_final_ms = median(&bases).unwrap_or(baseline_ms);
@@ -1734,6 +1748,17 @@ impl<'a> CudaPipeline<'a> {
         } else {
             true
         };
+
+        // Cross-shape regression guard: a candidate that wins the pinned shape
+        // but slows other shapes is an overfit, not a general win. Compare the
+        // per-shape medians (across rounds); any shape slower by more than γ fails.
+        let shape_speedups = shape_speedups(&base_merged, &cand_merged);
+        let regressions: Vec<(String, f64)> = shape_speedups
+            .iter()
+            .filter(|(_, s)| *s < 1.0 / self.cfg.hyper.gamma)
+            .cloned()
+            .collect();
+        let shape_reg_ok = regressions.is_empty();
 
         // Gate 4 verdict (pure, unit-tested below): a candidate counts as a real
         // improvement only if it beats the fresh baseline beyond BOTH the noise
@@ -1783,7 +1808,7 @@ impl<'a> CudaPipeline<'a> {
         let diff_path = self.run_dir.join("report.diff");
         let _ = std::fs::write(&diff_path, diff_text);
 
-        let passed = gate1_2 && gate3 && gate4 && shape_ok;
+        let passed = gate1_2 && gate3 && gate4 && shape_ok && shape_reg_ok;
         self.journal.record(&Event::GatesVerdict {
             stage: "gates".into(),
             passed,
@@ -1810,6 +1835,14 @@ impl<'a> CudaPipeline<'a> {
                 "diff_path": diff_path,
                 "stop_reason": stop_reason,
                 "iterations": iterations,
+                "shape_speedups": shape_speedups
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeMap<String, f64>>(),
+                "shape_regressions": regressions
+                    .iter()
+                    .map(|(l, s)| json!({"shape": l, "speedup": s}))
+                    .collect::<Vec<_>>(),
             }),
         })?;
 
@@ -1830,6 +1863,21 @@ impl<'a> CudaPipeline<'a> {
             } else {
                 ("matched", None)
             }
+        } else if !shape_reg_ok {
+            (
+                "fallback",
+                Some(format!(
+                    "candidate wins the pinned shape but regresses {} other shape(s) beyond γ={} \
+                     (overfit; baseline preserved): {}",
+                    regressions.len(),
+                    self.cfg.hyper.gamma,
+                    regressions
+                        .iter()
+                        .map(|(l, s)| format!("{l} {s:.3}x"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            )
         } else if !shape_ok {
             (
                 "fallback",
@@ -2330,6 +2378,33 @@ fn num_cpus() -> usize {
 }
 
 /// Median of a slice of floats (None when empty).
+/// Per-shape speedup (baseline / candidate) from the final interleaved rounds,
+/// using the per-shape median across rounds. Only shapes present in both arms.
+fn shape_speedups(
+    base: &[crate::parse::MergedBench],
+    cand: &[crate::parse::MergedBench],
+) -> Vec<(String, f64)> {
+    let per_shape = |runs: &[crate::parse::MergedBench]| {
+        let mut m: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
+        for r in runs {
+            for row in &r.rows {
+                if row.median_us > 0.0 {
+                    m.entry(row.label.clone()).or_default().push(row.median_us);
+                }
+            }
+        }
+        m.into_iter()
+            .map(|(k, v)| (k, median(&v).unwrap_or(f64::NAN)))
+            .collect::<std::collections::BTreeMap<String, f64>>()
+    };
+    let b = per_shape(base);
+    let c = per_shape(cand);
+    b.iter()
+        .filter_map(|(label, bu)| c.get(label).map(|cu| (label.clone(), bu / cu)))
+        .filter(|(_, s)| s.is_finite())
+        .collect()
+}
+
 fn median(v: &[f64]) -> Option<f64> {
     if v.is_empty() {
         return None;
@@ -2888,5 +2963,27 @@ mod verify_timeout_tests {
         assert_eq!(last_run_tail(&v, "stdout", 4), "ghij");
         assert_eq!(last_run_tail(&v, "stderr", 10), "boom");
         assert_eq!(last_run_tail(&v, "missing", 4), "");
+    }
+
+    #[test]
+    fn shape_speedups_compares_common_shapes() {
+        use crate::parse::{BenchRow, MergedBench};
+        let row = |label: &str, us: f64| BenchRow {
+            label: label.into(),
+            median_us: us,
+            ..Default::default()
+        };
+        let base = vec![MergedBench {
+            rows: vec![row("aligned", 628.0), row("misaligned", 860.0), row("base-only", 100.0)],
+            ..Default::default()
+        }];
+        let cand = vec![MergedBench {
+            rows: vec![row("aligned", 600.0), row("misaligned", 647.0)],
+            ..Default::default()
+        }];
+        let s: std::collections::BTreeMap<_, _> = shape_speedups(&base, &cand).into_iter().collect();
+        assert_eq!(s.len(), 2); // base-only shape is excluded
+        assert!((s["aligned"] - 628.0 / 600.0).abs() < 1e-9);
+        assert!((s["misaligned"] - 860.0 / 647.0).abs() < 1e-9);
     }
 }
