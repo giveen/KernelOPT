@@ -572,6 +572,7 @@ impl<'a> Pipeline<'a> {
                 outcome: "fallback".into(),
                 speedup: None,
                 root_cause: Some(root_cause.into()),
+                stop_reason: Some("not_optimizable".into()),
             })?;
             return Ok(json!({
                 "outcome": "fallback",
@@ -685,6 +686,7 @@ impl<'a> Pipeline<'a> {
                         outcome: "optimized".into(),
                         speedup,
                         root_cause: None,
+                        stop_reason: Some("completed".into()),
                     })?;
                     Ok(json!({
                         "outcome": "optimized",
@@ -699,6 +701,7 @@ impl<'a> Pipeline<'a> {
                         outcome: "fallback".into(),
                         speedup: None,
                         root_cause: Some(cause.into()),
+                        stop_reason: Some("e2e_rejected".into()),
                     })?;
                     Ok(json!({"outcome": "fallback", "root_cause": cause}))
                 }
@@ -709,6 +712,7 @@ impl<'a> Pipeline<'a> {
                     outcome: "fallback".into(),
                     speedup: None,
                     root_cause: Some(cause.into()),
+                    stop_reason: Some("no_candidate".into()),
                 })?;
                 Ok(json!({"outcome": "fallback", "root_cause": cause}))
             }

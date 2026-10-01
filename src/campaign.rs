@@ -407,6 +407,7 @@ fn run_one_target(
         bench_shape: opts.bench_shape.clone(),
         final_rounds: opts.final_rounds,
         verify_timeout_s: std::cell::Cell::new(DEFAULT_VERIFY_TIMEOUT_S),
+        recent_failures: Vec::new(),
     };
     pipe.run()
 }

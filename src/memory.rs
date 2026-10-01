@@ -203,6 +203,34 @@ impl StrategyTracker {
     }
 }
 
+/// A coarse, reusable tag for a plan direction, so `StrategyTracker` learns
+/// which *kinds* of change work for a kernel family rather than keying every
+/// attempt on a constant (which made `avoid_flags` inert). Buckets by the first
+/// technique keyword found; unknown directions are "other".
+pub fn strategy_tag(direction: &str) -> String {
+    let d = direction.to_ascii_lowercase();
+    const BUCKETS: &[(&str, &[&str])] = &[
+        ("sort_merge", &["sort", "merge", "radix", "top-k", "topk", "partial_keys"]),
+        ("warp", &["warp", "shfl", "shuffle", "__ballot", "lane"]),
+        ("async_pipeline", &["cp.async", "async", "pipeline", "double-buffer", "prefetch"]),
+        ("shared_memory", &["shared", "smem", "__shared__", "staging"]),
+        ("vectorize", &["vector", "pack", "uint4", "float4", "128-bit", "load_vec"]),
+        ("memory_hints", &["ldcs", "ldg", "evict", "l2", "cache", "streaming"]),
+        ("atomics", &["atomic", "handshake", "threadfence", "group_done"]),
+        ("reduce", &["reduc", "__reduce", "sum", "max(", "min("]),
+        ("unroll", &["unroll"]),
+        ("fuse", &["fus", "epilogue"]),
+        ("tile", &["tile", "block size", "xblock"]),
+        ("occupancy", &["occupancy", "register", "launch_bounds"]),
+    ];
+    for (tag, keys) in BUCKETS {
+        if keys.iter().any(|k| d.contains(k)) {
+            return (*tag).to_string();
+        }
+    }
+    "other".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +290,15 @@ mod tests {
         }
         t.record("pointwise", "autotune", true);
         assert_eq!(t.avoid_flags("pointwise"), vec!["warp_specialization"]);
+    }
+
+    #[test]
+    fn strategy_tag_buckets_directions() {
+        assert_eq!(strategy_tag("replace the block-wide merge sort with a warp merge"), "sort_merge");
+        assert_eq!(strategy_tag("use __shfl_down_sync within warp"), "warp");
+        assert_eq!(strategy_tag("add cp.async prefetch pipeline"), "async_pipeline");
+        assert_eq!(strategy_tag("vectorize the load with uint4"), "vectorize");
+        assert_eq!(strategy_tag("something entirely novel"), "other");
     }
 
     #[test]

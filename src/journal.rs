@@ -69,6 +69,11 @@ pub enum Event {
         outcome: String, // optimized | matched | fallback
         speedup: Option<f64>,
         root_cause: Option<String>,
+        /// Why the loop stopped (patience/target_reached/max_iterations/budget/
+        /// interrupted/baseline/no_candidate/e2e_rejected/…). `#[serde(default)]`
+        /// keeps older journals without the field parseable.
+        #[serde(default)]
+        stop_reason: Option<String>,
     },
 }
 
@@ -174,10 +179,14 @@ pub fn format_event(e: &Event) -> String {
         Event::GatesVerdict { stage, passed, .. } => {
             format!("· gates {stage}: {}", if *passed { "PASS" } else { "REJECT" })
         }
-        Event::RunFinished { outcome, speedup, root_cause } => format!(
-            "■ finished {outcome} {} {}",
+        Event::RunFinished { outcome, speedup, root_cause, stop_reason, .. } => format!(
+            "■ finished {outcome} {} {}{}",
             speedup.map(|s| format!("{s:.3}x")).unwrap_or_default(),
-            root_cause.clone().unwrap_or_default()
+            root_cause.clone().unwrap_or_default(),
+            stop_reason
+                .as_deref()
+                .map(|s| format!(" [{s}]"))
+                .unwrap_or_default()
         ),
     }
 }
@@ -236,6 +245,7 @@ mod tests {
             outcome: "optimized".into(),
             speedup: Some(1.42),
             root_cause: None,
+            stop_reason: Some("max_iterations".into()),
         })
         .unwrap();
         let events = Journal::replay(&dir, "r1").unwrap();
