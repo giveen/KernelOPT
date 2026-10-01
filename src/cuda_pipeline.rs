@@ -70,6 +70,19 @@ fn failure_signature(category: &str, error: &str) -> String {
     format!("{category}: {}", error_signature(error))
 }
 
+/// Last `n` chars of a field from the final bench run — used to surface the
+/// real cause (crash text, CUDA error) when a bench yields no measurements.
+fn last_run_tail(resp: &serde_json::Value, field: &str, n: usize) -> String {
+    let s = resp["runs"]
+        .as_array()
+        .and_then(|r| r.last())
+        .and_then(|r| r[field].as_str())
+        .unwrap_or("")
+        .trim();
+    let chars: Vec<char> = s.chars().collect();
+    chars[chars.len().saturating_sub(n)..].iter().collect()
+}
+
 pub struct CudaPipeline<'a> {
     pub cfg: &'a Config,
     pub llm: &'a dyn LlmClient,
@@ -537,7 +550,7 @@ impl<'a> CudaPipeline<'a> {
                         let csv_text = std::fs::read_to_string(&csv)
                             .ok()
                             .filter(|s| !s.trim().is_empty());
-                        runs.push(json!({"stdout": r["raw_stdout"], "csv": csv_text}));
+                        runs.push(json!({"stdout": r["raw_stdout"], "stderr": r["raw_stderr"], "csv": csv_text}));
                     }
                     json!({"ok": true, "exit_code": last, "runs": runs})
                 }
@@ -569,12 +582,28 @@ impl<'a> CudaPipeline<'a> {
         let merged = crate::parse::merge_bench_runs(&parsed, self.bench_shape.as_deref());
         if resp["exit_code"].as_i64().unwrap_or(1) != 0 || merged.representative_us.is_none() {
             let rows: usize = parsed.iter().map(|p| p.rows.len()).sum();
-            anyhow::bail!(
-                "bench produced no usable measurements (exit {}, {} run(s), {} row(s))",
-                resp["exit_code"],
-                parsed.len(),
-                rows
+            let code = resp["exit_code"].as_i64();
+            let how = match code {
+                Some(0) => "bench exited 0 but produced no parsable rows".to_string(),
+                Some(c) => format!("bench exited {c}"),
+                None => "bench terminated without an exit code (signal/crash?)".to_string(),
+            };
+            let mut msg = format!(
+                "bench produced no usable measurements: {how}; {} run(s), {rows} row(s)",
+                parsed.len()
             );
+            if let Some(c) = resp["command"].as_str() {
+                msg.push_str(&format!("\n  command: {c}"));
+            }
+            let out = last_run_tail(&resp, "stdout", 500);
+            if !out.is_empty() {
+                msg.push_str(&format!("\n  stdout tail: {out}"));
+            }
+            let err = last_run_tail(&resp, "stderr", 500);
+            if !err.is_empty() {
+                msg.push_str(&format!("\n  stderr tail: {err}"));
+            }
+            anyhow::bail!(msg);
         }
         self.last_bench_noise_pct = merged.noise_pct;
         self.last_bench_label = merged.representative_label.clone();
@@ -2796,5 +2825,15 @@ mod verify_timeout_tests {
         assert_eq!(error_signature("line one\nline two"), "line one");
         assert_eq!(error_signature("\n\n   spaced   \nmore"), "spaced");
         assert_eq!(failure_signature("compile", "boom\ndetail"), "compile: boom");
+    }
+
+    #[test]
+    fn last_run_tail_takes_the_end() {
+        let v = serde_json::json!({
+            "runs": [{"stdout": "early"}, {"stdout": "abcdefghij", "stderr": "boom"}]
+        });
+        assert_eq!(last_run_tail(&v, "stdout", 4), "ghij");
+        assert_eq!(last_run_tail(&v, "stderr", 10), "boom");
+        assert_eq!(last_run_tail(&v, "missing", 4), "");
     }
 }

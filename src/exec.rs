@@ -249,7 +249,7 @@ pub fn bench(
         let csv = csv_out
             .and_then(|p| std::fs::read_to_string(p).ok())
             .filter(|s| !s.trim().is_empty());
-        runs.push(json!({"stdout": o.stdout, "csv": csv}));
+        runs.push(json!({"stdout": o.stdout, "stderr": o.stderr, "csv": csv}));
     }
     Ok(json!({
         "ok": true, "passed": last_code == Some(0), "exit_code": last_code,
@@ -450,7 +450,7 @@ pub fn llama_perf(
             bail!("llama_bench timed out after {timeout_secs}s");
         }
         last = o.code;
-        runs.push(json!({"stdout": o.stdout, "csv": Value::Null}));
+        runs.push(json!({"stdout": o.stdout, "stderr": o.stderr, "csv": Value::Null}));
     }
     Ok(json!({
         "ok": true, "passed": last == Some(0), "exit_code": last,
