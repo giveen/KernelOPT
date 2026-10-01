@@ -310,6 +310,24 @@ mod tests {
     }
 
     #[test]
+    fn diverse_select_fills_beam_only_with_unique_ids() {
+        // Children of one arm all share chain 0; phase 1 keeps one, phase 2
+        // fills the rest — but only if ids are distinct.
+        let unique = vec![
+            cand("i0_c0_p0_a0", 0, Some(1.0), true),
+            cand("i0_c0_p1_a0", 0, Some(2.0), true),
+        ];
+        assert_eq!(diverse_select(&unique, 2).len(), 2);
+        // Colliding ids (the id-scheme bug) make phase 2 drop the sibling, so
+        // the beam can never grow past one node — starving UCB.
+        let collide = vec![
+            cand("i0_c0_a0", 0, Some(1.0), true),
+            cand("i0_c0_a0", 0, Some(2.0), true),
+        ];
+        assert_eq!(diverse_select(&collide, 2).len(), 1);
+    }
+
+    #[test]
     fn diverse_select_nodes_preserves_expansions() {
         let nodes = vec![
             BeamNode { candidate: cand("a", 0, Some(2.0), true), expansions: 7 },

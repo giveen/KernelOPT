@@ -952,6 +952,7 @@ impl<'a> CudaPipeline<'a> {
         plan: &PlannedChange,
         chain_idx: u32,
         iteration: u32,
+        plan_no: u32,
     ) -> Result<(Candidate, Option<String>)> {
         let prompt_file = match self.edit_mode {
             EditMode::Patch => "cuda-executor-patch.md",
@@ -1060,7 +1061,7 @@ impl<'a> CudaPipeline<'a> {
                         let _ = std::fs::write(
                             self.run_dir
                                 .join("candidates")
-                                .join(format!("i{iteration}_c{chain_idx}_a{attempt}.patch")),
+                                .join(format!("i{iteration}_c{chain_idx}_p{plan_no}_a{attempt}.patch")),
                             &patch,
                         );
                         std::fs::read_to_string(self.target_path())
@@ -1114,7 +1115,7 @@ impl<'a> CudaPipeline<'a> {
             let sub_path = self
                 .run_dir
                 .join("candidates")
-                .join(format!("i{iteration}_c{chain_idx}_a{attempt}.cu"));
+                .join(format!("i{iteration}_c{chain_idx}_p{plan_no}_a{attempt}.cu"));
             let _ = std::fs::write(&sub_path, &candidate_source);
             std::fs::write(self.target_path(), &candidate_source)
                 .context("writing candidate into worktree")?;
@@ -1192,7 +1193,7 @@ impl<'a> CudaPipeline<'a> {
                 &crate::memory::strategy_tag(&plan.change),
                 true,
             );
-            let id = format!("i{iteration}_c{chain_idx}_a{attempt}");
+            let id = format!("i{iteration}_c{chain_idx}_p{plan_no}_a{attempt}");
             // Commit the accepted candidate so it can be reverted to / read later.
             let commit = self.commit_candidate(&id, &plan.change, latency_ms);
             return Ok((
@@ -1215,7 +1216,7 @@ impl<'a> CudaPipeline<'a> {
 
         Ok((
             Candidate {
-                id: format!("i{iteration}_c{chain_idx}_failed"),
+                id: format!("i{iteration}_c{chain_idx}_p{plan_no}_failed"),
                 chain: chain_idx,
                 iteration,
                 source: String::new(),
@@ -1432,6 +1433,7 @@ impl<'a> CudaPipeline<'a> {
                 pending[a] += 1;
             }
 
+            let mut plan_no: u32 = 0;
             for (arm, &count) in pending.iter().enumerate() {
                 if count == 0 {
                     continue;
@@ -1440,6 +1442,8 @@ impl<'a> CudaPipeline<'a> {
                 let parent_expansions = frontier[arm].expansions;
                 let chain_u = arm as u32;
                 for _ in 0..count {
+                    let this_plan = plan_no;
+                    plan_no += 1;
                     if self.interrupted() {
                         stop_reason = "interrupted";
                         self.save_checkpoint(iteration, iterations_run, &best, best_ms, baseline_ms, &recent_directions, patience_used);
@@ -1483,7 +1487,7 @@ impl<'a> CudaPipeline<'a> {
                     ));
 
                     let (cand, last_error) =
-                        self.stage_execute_and_verify(&parent.source, &plan, chain_u, iteration)?;
+                        self.stage_execute_and_verify(&parent.source, &plan, chain_u, iteration, this_plan)?;
                     self.journal.record(&Event::CandidateEvaluated {
                         iteration,
                         chain: chain_u,
