@@ -69,6 +69,9 @@ enum Cmd {
         /// Executor retries K (default 4).
         #[arg(long)]
         retries: Option<u32>,
+        /// Print the raw JSON result instead of a human summary.
+        #[arg(long)]
+        json: bool,
     },
     /// Optimize one ninfer Op's CUDA kernel in an isolated git worktree.
     RunNinfer {
@@ -127,6 +130,9 @@ enum Cmd {
         /// This is internal only — the run always outputs a reviewable unified diff.
         #[arg(long, default_value = "full")]
         edit_mode: String,
+        /// Print the raw JSON result instead of a human summary.
+        #[arg(long)]
+        json: bool,
         #[command(flatten)]
         loop_: LoopArgs,
     },
@@ -184,6 +190,9 @@ enum Cmd {
         /// This is internal only — the run always outputs a reviewable unified diff.
         #[arg(long, default_value = "full")]
         edit_mode: String,
+        /// Print the raw JSON result instead of a human summary.
+        #[arg(long)]
+        json: bool,
         #[command(flatten)]
         loop_: LoopArgs,
     },
@@ -617,6 +626,7 @@ fn main() -> Result<()> {
             plans,
             beam,
             retries,
+            json,
         } => {
             let hyper = Hyper {
                 t_iterations: iterations.unwrap_or(5),
@@ -656,11 +666,15 @@ fn main() -> Result<()> {
                 last_bench_signals: None,
             };
             let result = pipe.run(&model_abs)?;
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                print_run_result(&result, true);
+            }
             Ok(())
         }
 
-        Cmd::RunNinfer { op, repo, llm: llm_args, kernel_file, build_dir, bench_args, e2e_weights, e2e_engine, e2e_cmd, e2e_prompt, e2e_max_new, run_id, ncu_set, quiet, watch, bench_shape, final_rounds, edit_mode, loop_ } => {
+        Cmd::RunNinfer { op, repo, llm: llm_args, kernel_file, build_dir, bench_args, e2e_weights, e2e_engine, e2e_cmd, e2e_prompt, e2e_max_new, run_id, ncu_set, quiet, watch, bench_shape, final_rounds, edit_mode, json, loop_ } => {
             let repo = resolve_repo(repo, &["NINFER_REPO"], "NINFER_REPO")?;
             let backend = Backend::Ninfer;
             let cfg = load_cuda_config(&llm_args, &loop_, ProfilerMode::Ncu, ncu_set)?;
@@ -689,14 +703,18 @@ fn main() -> Result<()> {
                 bench_shape,
                 final_rounds,
             })?;
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                print_run_result(&serde_json::to_value(&result)?, !watch);
+            }
             if result.paused {
                 eprintln!("paused; re-run with --run-id {session_id} to continue");
             }
             Ok(())
         }
 
-        Cmd::RunLlamacpp { op, repo, llm: llm_args, kernel_file, build_dir, bench_args, e2e_weights, e2e_engine, e2e_cmd, e2e_prompt, e2e_max_new, run_id, ncu_set, quiet, watch, bench_shape, final_rounds, edit_mode, loop_ } => {
+        Cmd::RunLlamacpp { op, repo, llm: llm_args, kernel_file, build_dir, bench_args, e2e_weights, e2e_engine, e2e_cmd, e2e_prompt, e2e_max_new, run_id, ncu_set, quiet, watch, bench_shape, final_rounds, edit_mode, json, loop_ } => {
             let repo = resolve_repo(repo, &["LLAMACPP_REPO"], "LLAMACPP_REPO")?;
             let backend = Backend::Llamacpp;
             let cfg = load_cuda_config(&llm_args, &loop_, ProfilerMode::Ncu, ncu_set)?;
@@ -725,7 +743,11 @@ fn main() -> Result<()> {
                 bench_shape,
                 final_rounds,
             })?;
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                print_run_result(&serde_json::to_value(&result)?, !watch);
+            }
             if result.paused {
                 eprintln!("paused; re-run with --run-id {session_id} to continue");
             }
@@ -1556,6 +1578,52 @@ fn wizard(
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())
+}
+
+/// Default, human-readable result for the `run*` commands. The raw object is
+/// printed only with `--json` (for scripts).
+fn print_run_result(v: &serde_json::Value, show_paths: bool) {
+    let outcome = v["outcome"].as_str().unwrap_or("?");
+    let speedup = v["speedup"].as_f64();
+    println!(
+        "\noutcome:    {outcome}{}",
+        speedup.map(|s| format!("  ({s:.3}x)")).unwrap_or_default()
+    );
+    if let (Some(b), Some(f)) = (v["baseline_ms"].as_f64(), v["final_ms"].as_f64()) {
+        println!("latency:    {b:.4} ms → {f:.4} ms");
+    }
+    if let Some(sr) = v["stop_reason"].as_str().filter(|s| !s.is_empty()) {
+        println!("stopped:    {sr}");
+    }
+    println!(
+        "llm:        {} calls · {} tokens",
+        v["llm_calls"].as_u64().unwrap_or(0),
+        v["tokens"].as_u64().unwrap_or(0)
+    );
+    if let Some(c) = v["root_cause"].as_str() {
+        println!("root cause: {c}");
+    }
+    if show_paths {
+        if let Some(d) = v["diff_path"].as_str() {
+            let p = std::path::Path::new(d);
+            if let Some(dir) = p.parent() {
+                println!("report:     {}", rel_path(&dir.join("report.md")));
+            }
+            println!("diff:       {}", rel_path(p));
+        }
+    }
+    println!();
+}
+
+/// Render a path relative to the cwd (`./…`) when it lives under it.
+fn rel_path(p: &std::path::Path) -> String {
+    match std::env::current_dir()
+        .ok()
+        .and_then(|c| p.strip_prefix(c).ok().map(|r| r.to_path_buf()))
+    {
+        Some(r) => format!("./{}", r.display()),
+        None => p.display().to_string(),
+    }
 }
 
 fn ask_line(prompt: &str) -> Result<String> {

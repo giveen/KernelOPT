@@ -22,6 +22,12 @@ pub enum Event {
         #[serde(flatten)]
         data: Value,
     },
+    /// A long phase began — emitted so `--watch`/`status` show progress during
+    /// otherwise-silent work (cold builds, NCU profiling).
+    StageStarted {
+        stage: String,
+        note: String,
+    },
     CandidateEvaluated {
         iteration: u32,
         chain: u32,
@@ -151,6 +157,9 @@ pub fn format_event(e: &Event) -> String {
         }
         Event::StageCompleted { stage, data } => {
             format!("· stage {stage}: {}", truncate(&flatten(&data.to_string()), 200))
+        }
+        Event::StageStarted { stage, note } => {
+            format!("… {stage}: {note}")
         }
         Event::AttemptFailed { iteration, chain, attempt, category, error } => {
             format!("  i{iteration}/c{chain} a{attempt} ✗ {category}: {}", flatten(error))

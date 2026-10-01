@@ -300,6 +300,17 @@ impl<'a> CudaPipeline<'a> {
         }
     }
 
+    /// Announce a long phase to both the live stderr log and the journal, so
+    /// `--watch` (which suppresses `progress`) still shows what's happening
+    /// during otherwise-silent work like cold builds and NCU profiling.
+    fn stage_start(&mut self, stage: &str, note: impl AsRef<str>) {
+        self.progress(format!("· {stage}: {}", note.as_ref()));
+        let _ = self.journal.record(&Event::StageStarted {
+            stage: stage.into(),
+            note: note.as_ref().to_string(),
+        });
+    }
+
     fn target_path(&self) -> PathBuf {
         self.worktree.join(&self.target.target_file)
     }
@@ -388,6 +399,10 @@ impl<'a> CudaPipeline<'a> {
             data: json!({"worktree": self.worktree, "head": wt["head"], "reused": wt["reused"]}),
         })?;
 
+        self.stage_start(
+            "compile_baseline",
+            "building baseline (cold builds can take minutes)",
+        );
         let cfg = if let Some(bc) = &self.target.build_cmd {
             let argv = crate::custom::expand(bc, &self.worktree, &self.build_dir, None);
             crate::exec::run_argv(&argv, 3600).context("custom build")?
@@ -572,6 +587,7 @@ impl<'a> CudaPipeline<'a> {
     }
 
     pub fn stage_profile(&mut self) -> Option<serde_json::Value> {
+        self.stage_start("profile", "profiling with NCU (this can take ~a minute)");
         let report = self
             .run_dir
             .join("ncu")
@@ -1566,6 +1582,7 @@ impl<'a> CudaPipeline<'a> {
         iterations: u32,
         stop_reason: &str,
     ) -> Result<PipelineResult> {
+        self.stage_start("finalize", "rebuilding the winner and running the gates");
         // Materialize the winner, rebuild, re-test (Gates 1–2).
         self.materialize_winner(&best)?;
         let compile = self.compile_now()?;
