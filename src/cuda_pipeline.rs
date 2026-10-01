@@ -106,6 +106,9 @@ pub struct CudaPipeline<'a> {
     /// Compact signatures of recent failed attempts, fed to the Planner so it
     /// stops repeating dead ends (e.g. the same CUB API that won't compile).
     pub recent_failures: Vec<String>,
+    /// Runtime-detected toolchain summary (compiler/arch) shown to the Planner.
+    /// `None` until the baseline build has configured the tree.
+    pub toolchain: Option<String>,
     /// Effective bandwidth (GB/s) of the most recent bench's representative shape.
     pub last_bench_gbs: Option<f64>,
     /// Device memory roofline (GB/s) reported by the most recent bench.
@@ -409,6 +412,8 @@ impl<'a> CudaPipeline<'a> {
         if cfg["passed"] != json!(true) {
             anyhow::bail!("baseline build failed: {}", first_error(&cfg));
         }
+        // Detect the host toolchain/arch for the Planner (never hardcoded).
+        self.toolchain = crate::exec::detect_toolchain(&self.build_dir);
 
         let verify = {
             let t0 = Instant::now();
@@ -744,6 +749,12 @@ impl<'a> CudaPipeline<'a> {
                 "\n\nRECENT FAILURES (do NOT repeat these; if a direction is still right, \
                  fix the specific error rather than restating it):\n{}",
                 self.recent_failures.join("\n")
+            ));
+        }
+        if let Some(tc) = &self.toolchain {
+            user.push_str(&format!(
+                "\n\nTOOLCHAIN (detected at runtime on THIS host — target your edits to it; \
+                 prefer primitives known to exist here over ones you assume are available):\n{tc}"
             ));
         }
 

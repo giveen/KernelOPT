@@ -1265,6 +1265,7 @@ fn run_single(
         final_rounds: opts.final_rounds,
         verify_timeout_s: std::cell::Cell::new(DEFAULT_VERIFY_TIMEOUT_S),
         recent_failures: Vec::new(),
+        toolchain: None,
     };
     pipe.run()
 }

@@ -457,3 +457,128 @@ pub fn llama_perf(
         "repeats": repeats, "runs": runs,
     }))
 }
+
+/// Best-effort, runtime toolchain summary for the Planner: compiler + release
+/// and the target GPU arch. Every value is detected from the host (compiler
+/// `--version`, the build's CMake cache, the live GPU) — nothing is hardcoded,
+/// so it adapts to any NVIDIA/CUDA, AMD/ROCm, or CPU-only machine. `None` when
+/// nothing is detectable.
+pub fn detect_toolchain(build_dir: &Path) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = tool_version("nvcc", "release ") {
+        parts.push(format!("nvcc {v}"));
+    } else if let Some(v) = tool_version("hipcc", "HIP version:") {
+        parts.push(format!("hipcc {v}"));
+    }
+    // Prefer the arch the build was configured for; else the live GPU. CUDA and
+    // HIP caches use different keys; the two GPU probes cover NVIDIA and AMD.
+    if let Some(a) = cache_value(build_dir, "CMAKE_CUDA_ARCHITECTURES")
+        .or_else(|| cache_value(build_dir, "CMAKE_HIP_ARCHITECTURES"))
+    {
+        parts.push(format!("target arch {a}"));
+    } else if let Some(cc) = nvidia_compute_cap() {
+        parts.push(format!("target sm_{cc}"));
+    } else if let Some(a) = amd_arch() {
+        parts.push(format!("target {a}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
+}
+
+/// Leading version token after `needle` in `<tool> --version` (nvcc → "13.3").
+fn tool_version(tool: &str, needle: &str) -> Option<String> {
+    let out = Command::new(tool).arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let rest = text.get(text.find(needle)? + needle.len()..)?;
+    let tok: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    (!tok.is_empty()).then_some(tok)
+}
+
+/// `KEY` value from a CMake cache (the arch the target is actually built for).
+fn cache_value(build_dir: &Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(build_dir.join("CMakeCache.txt")).ok()?;
+    text.lines()
+        .find_map(|l| l.split_once('=').filter(|(k, _)| k.starts_with(key)))
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// NVIDIA GPU compute capability as digits ("12.0" → "120"), if `nvidia-smi`
+/// can report it.
+fn nvidia_compute_cap() -> Option<String> {
+    let out = Command::new("nvidia-smi")
+        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    compute_cap_digits(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// AMD GPU target arch (`gfxNNNN`), via `amdgpu-arch` (ships with ROCm) with a
+/// `rocminfo` fallback. `None` on non-AMD hosts.
+fn amd_arch() -> Option<String> {
+    if let Ok(o) = Command::new("amdgpu-arch").output() {
+        if o.status.success() {
+            if let Some(a) = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::trim)
+                .find(|l| l.starts_with("gfx"))
+            {
+                return Some(a.to_string());
+            }
+        }
+    }
+    let o = Command::new("rocminfo").output().ok()?;
+    if !o.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&o.stdout)
+        .split_whitespace()
+        .find(|t| t.starts_with("gfx"))
+        .map(|s| s.trim_matches(|c| c == ',' || c == ';').to_string())
+}
+
+/// "12.0" → "120"; already-digit strings pass through. `None` if empty.
+fn compute_cap_digits(s: &str) -> Option<String> {
+    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+    (!digits.is_empty()).then_some(digits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_cap_digits_normalizes() {
+        assert_eq!(compute_cap_digits("12.0\n"), Some("120".into()));
+        assert_eq!(compute_cap_digits("9.0"), Some("90".into()));
+        assert_eq!(compute_cap_digits("n/a"), None);
+    }
+
+    #[test]
+    fn cache_value_reads_arch() {
+        let dir = std::env::temp_dir()
+            .join(format!("kernelopt-cache-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("CMakeCache.txt"),
+            "// cuda arch\nCMAKE_CUDA_ARCHITECTURES:UNINITIALIZED=120a\nOTHER=VALUE\n",
+        )
+        .unwrap();
+        assert_eq!(cache_value(&dir, "CMAKE_CUDA_ARCHITECTURES"), Some("120a".into()));
+        assert_eq!(cache_value(&dir, "CMAKE_HIP_ARCHITECTURES"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
