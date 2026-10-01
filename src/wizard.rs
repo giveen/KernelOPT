@@ -8,19 +8,20 @@
 use crate::backend::Backend;
 use std::path::PathBuf;
 
-/// Loop presets: (iterations, beam).
-pub fn preset(name: &str) -> (u32, u32) {
+/// Loop presets: (iterations, beam, plans). Plans are 2× beam so UCB has room
+/// to allocate across the beam (N > B) while cost still scales with the preset.
+pub fn preset(name: &str) -> (u32, u32, u32) {
     match name.trim().to_ascii_lowercase().as_str() {
-        "quick" | "fast" => (2, 1),
-        "thorough" | "deep" => (5, 3),
-        _ => (3, 2), // "standard"
+        "quick" | "fast" => (2, 1, 2),
+        "thorough" | "deep" => (5, 3, 6),
+        _ => (3, 2, 4), // "standard"
     }
 }
 
 pub const PRESETS: [(&str, &str); 3] = [
-    ("quick", "2 iterations, beam 1 — a fast first look"),
-    ("standard", "3 iterations, beam 2 — the default"),
-    ("thorough", "5 iterations, beam 3 — more search, more cost"),
+    ("quick", "2 iterations, beam 1, 2 plans — a fast first look"),
+    ("standard", "3 iterations, beam 2, 4 plans — the default"),
+    ("thorough", "5 iterations, beam 3, 6 plans — more search, more cost"),
 ];
 
 /// A fully-resolved wizard choice.
@@ -37,6 +38,7 @@ pub struct Plan {
     pub e2e: Option<String>,
     pub iterations: u32,
     pub beam: u32,
+    pub plans: u32,
     pub watch: bool,
 }
 
@@ -51,6 +53,8 @@ impl Plan {
             a.push(self.backend.as_str().into());
             a.push("--max-iterations".into());
             a.push(self.iterations.to_string());
+            a.push("--plans".into());
+            a.push(self.plans.to_string());
             if let Some(op) = &self.op {
                 a.push("--op".into());
                 a.push(op.clone());
@@ -72,6 +76,8 @@ impl Plan {
             a.push(self.iterations.to_string());
             a.push("--beam".into());
             a.push(self.beam.to_string());
+            a.push("--plans".into());
+            a.push(self.plans.to_string());
         }
         a.push("--repo".into());
         a.push(self.repo.to_string_lossy().into());
@@ -129,16 +135,17 @@ mod tests {
             e2e: Some("qwen3_8_27b_nvfp4".into()),
             iterations: 3,
             beam: 2,
+            plans: 4,
             watch: true,
         }
     }
 
     #[test]
     fn presets_are_sane() {
-        assert_eq!(preset("quick"), (2, 1));
-        assert_eq!(preset("standard"), (3, 2));
-        assert_eq!(preset("thorough"), (5, 3));
-        assert_eq!(preset("bogus"), (3, 2));
+        assert_eq!(preset("quick"), (2, 1, 2));
+        assert_eq!(preset("standard"), (3, 2, 4));
+        assert_eq!(preset("thorough"), (5, 3, 6));
+        assert_eq!(preset("bogus"), (3, 2, 4));
     }
 
     #[test]
@@ -148,6 +155,7 @@ mod tests {
         assert!(a.windows(2).any(|w| w == ["--op", "add_bias"]));
         assert!(a.windows(2).any(|w| w == ["--iterations", "3"]));
         assert!(a.windows(2).any(|w| w == ["--beam", "2"]));
+        assert!(a.windows(2).any(|w| w == ["--plans", "4"]));
         assert!(a.windows(2).any(|w| w == ["--e2e-weights", "qwen3_8_27b_nvfp4"]));
         assert_eq!(a.last().unwrap(), "--watch");
     }
@@ -158,6 +166,7 @@ mod tests {
         assert_eq!(a[0], "campaign");
         assert!(a.windows(2).any(|w| w == ["--mode", "ninfer"]));
         assert!(a.windows(2).any(|w| w == ["--max-iterations", "3"]));
+        assert!(a.windows(2).any(|w| w == ["--plans", "4"]));
         assert!(!a.iter().any(|x| x == "--beam"));
     }
 
