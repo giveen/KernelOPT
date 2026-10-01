@@ -122,6 +122,9 @@ pub struct CudaPipeline<'a> {
     /// Runtime-detected toolchain summary (compiler/arch) shown to the Planner.
     /// `None` until the baseline build has configured the tree.
     pub toolchain: Option<String>,
+    /// Measured speedup of recent attempts (`<strategy>: <x>`), so the Planner
+    /// sees what actually trends up, not just plan text.
+    pub recent_results: Vec<String>,
     /// Effective bandwidth (GB/s) of the most recent bench's representative shape.
     pub last_bench_gbs: Option<f64>,
     /// Device memory roofline (GB/s) reported by the most recent bench.
@@ -279,6 +282,17 @@ impl<'a> CudaPipeline<'a> {
             }
         }
         repeated_compile
+    }
+
+    /// Remember a candidate's measured speedup keyed by strategy family, so the
+    /// Planner sees the gradient, not just the direction text (last few kept).
+    fn record_result(&mut self, speedup: f64, plan: &str) {
+        let tag = crate::memory::strategy_tag(plan);
+        self.recent_results.push(format!("{tag}: {speedup:.2}x"));
+        let n = self.recent_results.len();
+        if n > 8 {
+            self.recent_results.drain(0..n - 8);
+        }
     }
 
     fn budget_ok(&self) -> bool {
@@ -802,6 +816,13 @@ impl<'a> CudaPipeline<'a> {
                  prefer primitives known to exist here over ones you assume are available):\n{tc}"
             ));
         }
+        if !self.recent_results.is_empty() {
+            user.push_str(&format!(
+                "\n\nRECENT RESULTS (direction → measured speedup on the gate shape; \
+                 lean into what trends up, avoid what regressed):\n{}",
+                self.recent_results.join("\n")
+            ));
+        }
 
         let tools = vec![
             ToolDef {
@@ -1243,6 +1264,11 @@ impl<'a> CudaPipeline<'a> {
         iteration: u32,
     ) -> Result<()> {
         let store = self.memory.should_store(speedup);
+        // Marginal results (neither a strong win nor a strong regression) are
+        // never stored, so don't spend an LLM call curating them.
+        if !store {
+            return Ok(());
+        }
         let system = self.render_prompt("summarizer.md", &json!({}))?;
         let user = format!(
             "SLOW KERNEL:\n```cuda\n{slow_source}\n```\n\nFAST KERNEL:\n```cuda\n{fast_source}\n```\n\n\
@@ -1266,7 +1292,7 @@ impl<'a> CudaPipeline<'a> {
                 action: action.into(),
                 direction: Some(plan.chars().take(80).collect()),
             })?;
-        } else if store {
+        } else {
             let fallback = ExperienceItem {
                 item_id: format!("fb_{}", uuid::Uuid::new_v4().simple()),
                 iteration,
@@ -1423,11 +1449,9 @@ impl<'a> CudaPipeline<'a> {
             // Allocate this iteration's N plans across the beam by UCB(c): the
             // best-latency arm draws more plans while underexpanded arms keep a
             // bonus (paper §4.3). `pending[arm]` = plans assigned to each arm.
-            let slots = allocate_expansions(
-                &frontier,
-                self.cfg.hyper.n_plans,
-                self.cfg.hyper.ucb_c,
-            );
+            let n_plans =
+                crate::search::plans_for_frontier(self.cfg.hyper.n_plans, frontier.len());
+            let slots = allocate_expansions(&frontier, n_plans, self.cfg.hyper.ucb_c);
             let mut pending = vec![0u32; frontier.len()];
             for &a in &slots {
                 pending[a] += 1;
@@ -1517,6 +1541,7 @@ impl<'a> CudaPipeline<'a> {
                                 String::new()
                             }
                         ));
+                        self.record_result(speedup, &plan.change);
                         self.stage_summarize(&parent.source, &cand.source, &plan.change, speedup, iteration)?;
                         if let Some(ms) = cand.latency_ms {
                             if ms < best_ms {

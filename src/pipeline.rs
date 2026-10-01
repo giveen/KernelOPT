@@ -430,6 +430,10 @@ impl<'a> Pipeline<'a> {
     ) -> Result<()> {
         // Cheap-path: store even without the LLM when thresholds are met.
         let store = self.memory.should_store(speedup);
+        // Marginal results aren't stored — skip the LLM call entirely.
+        if !store {
+            return Ok(());
+        }
         let system = self.render_prompt("summarizer.md", &json!({}))?;
         let user = format!(
             "SLOW KERNEL:\n```python\n{slow_source}\n```\n\nFAST KERNEL:\n```python\n{fast_source}\n```\n\nPLAN APPLIED: {plan}\n\nPROFILE BEFORE:\n{before}\n\nPROFILE AFTER:\n{after}\n\nSPEEDUP: {speedup:.3}",
@@ -454,7 +458,7 @@ impl<'a> Pipeline<'a> {
                 action: action.into(),
                 direction: Some(plan.chars().take(80).collect()),
             })?;
-        } else if store {
+        } else {
             // LLM output unparseable: record a minimal experience item so the
             // signal (win or regression) is not lost.
             let fallback = ExperienceItem {
@@ -632,11 +636,9 @@ impl<'a> Pipeline<'a> {
             let diversity_hint = meltdown_detected(&recent_directions, 6, 2);
 
             // Allocate this iteration's N plans across the beam by UCB(c).
-            let slots = allocate_expansions(
-                &frontier,
-                self.cfg.hyper.n_plans,
-                self.cfg.hyper.ucb_c,
-            );
+            let n_plans =
+                crate::search::plans_for_frontier(self.cfg.hyper.n_plans, frontier.len());
+            let slots = allocate_expansions(&frontier, n_plans, self.cfg.hyper.ucb_c);
             let mut pending = vec![0u32; frontier.len()];
             for &a in &slots {
                 pending[a] += 1;

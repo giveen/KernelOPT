@@ -119,6 +119,7 @@ fn ninfer_identity_walk_add_bias() {
         verify_timeout_s: std::cell::Cell::new(kernelopt::cuda_pipeline::DEFAULT_VERIFY_TIMEOUT_S),
         recent_failures: Vec::new(),
         toolchain: None,
+        recent_results: Vec::new(),
     };
 
     let result = pipe.run().unwrap();

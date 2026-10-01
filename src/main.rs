@@ -1288,6 +1288,7 @@ fn run_single(
         verify_timeout_s: std::cell::Cell::new(DEFAULT_VERIFY_TIMEOUT_S),
         recent_failures: Vec::new(),
         toolchain: None,
+        recent_results: Vec::new(),
     };
     pipe.run()
 }
