@@ -83,8 +83,10 @@ does not establish correctness.
 The current CUDA pipeline's `optimized` label describes its configured gates.
 [Engine verification](model-e2e.md) is opt-in. The measured-shape gate can be
 `skipped` for unsupported test signatures; that is not a passed shape check.
-Inspect the gate details in the [journal/report](outputs.md), not only the label.
-Custom test commands are only as strong as the checks behind their exit status.
+Inspect the gate details in the [journal/report](outputs.md), not only the label:
+the `gates` event's `gate5_shape` field carries its own `status`
+(`passed`/`failed`/`skipped`) and `reason`. Custom test commands are only as strong
+as the checks behind their exit status.
 
 Recommended language for a review:
 
@@ -121,5 +123,8 @@ Alongside the existing run artifacts, record:
   it, such as a changed dispatch cost or a larger share in the integrated model.
 
 Preserve informative failures and correct-but-slower candidates without promoting
-them. Avoid rerunning an unchanged experiment without a new question. Passing
-checks should support a bounded claim and a concrete decision.
+them. Avoid rerunning an unchanged experiment without a new question — repetition
+is justified by a change to the product, a suspected intermittent result, an
+untrusted prior run, a deliberate mutation or a benchmark baseline
+([ten reasons to repeat tests](https://www.satisfice.com/reasons-to-repeat-tests)).
+Passing checks should support a bounded claim and a concrete decision.
