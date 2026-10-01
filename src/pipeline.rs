@@ -12,7 +12,7 @@ use crate::journal::{Event, Journal};
 use crate::llm::{Completion, LlmClient, ToolCall, ToolDef};
 use crate::memory::{parse_summarizer_output, ExperienceItem, ExperienceMemory, MemoryUpdate, StrategyTracker};
 use crate::runner_bridge::RunnerBridge;
-use crate::search::{diverse_select, meltdown_detected, Candidate};
+use crate::search::{allocate_expansions, diverse_select_nodes, meltdown_detected, BeamNode, Candidate};
 use crate::signals;
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -606,60 +606,102 @@ impl<'a> Pipeline<'a> {
         let mut no_improvement_streak = 0u32;
         let mut best_ms = baseline_ms;
 
+        // Beam frontier: the extracted Inductor kernel is the root arm. Each arm
+        // tracks how often its chain has been expanded, which drives UCB plan
+        // allocation (paper §4.3).
+        let mut frontier: Vec<BeamNode> = vec![BeamNode {
+            expansions: 0,
+            candidate: Candidate {
+                id: "baseline".into(),
+                chain: 0,
+                iteration: 0,
+                source: kernel_workbench.clone(),
+                plan: "(baseline)".into(),
+                latency_ms: if baseline_ms > 0.0 { Some(baseline_ms) } else { None },
+                passed: true,
+                commit: None,
+                change_summary: None,
+                hints: None,
+                evidence: None,
+            },
+        }];
+
         'outer: for iteration in 0..self.cfg.hyper.t_iterations {
-            let mut candidates: Vec<Candidate> = Vec::new();
+            let mut children: Vec<BeamNode> = Vec::new();
             let diversity_hint = meltdown_detected(&recent_directions, 6, 2);
 
-            for chain in 0..self.cfg.hyper.b_beam.max(1) {
-                let plan = self.stage_plan(
-                    &kernel_workbench,
-                    &profiling_ctx,
-                    chain,
-                    diversity_hint,
-                    &recent_directions,
-                )?;
-                recent_directions.push(plan.clone());
+            // Allocate this iteration's N plans across the beam by UCB(c).
+            let slots = allocate_expansions(
+                &frontier,
+                self.cfg.hyper.n_plans,
+                self.cfg.hyper.ucb_c,
+            );
+            let mut pending = vec![0u32; frontier.len()];
+            for &a in &slots {
+                pending[a] += 1;
+            }
 
-                let (cand, payload, last_error) =
-                    self.stage_execute_and_verify(&kernel_workbench, &plan, chain, iteration)?;
-                self.journal.record(&Event::CandidateEvaluated {
-                    iteration,
-                    chain,
-                    plan: plan.clone(),
-                    passed: cand.passed,
-                    latency_ms: cand.latency_ms,
-                    error: last_error.clone(),
-                    commit: None,
-                    change_summary: None,
-                    hints: None,
-                    evidence: None,
-                })?;
-
-                if cand.passed {
-                    // Summarizer → experience memory (paper §4.5).
-                    let speedup = cand
-                        .latency_ms
-                        .map(|m| baseline_ms / m)
-                        .unwrap_or(1.0);
-                    self.stage_summarize(
-                        baseline_payload.as_deref(),
-                        payload.as_deref(),
-                        &kernel_workbench,
-                        &cand.source,
-                        &plan,
-                        speedup,
-                        iteration,
+            for (arm, &count) in pending.iter().enumerate() {
+                if count == 0 {
+                    continue;
+                }
+                let parent = frontier[arm].candidate.clone();
+                let parent_expansions = frontier[arm].expansions;
+                let chain = arm as u32;
+                for _ in 0..count {
+                    let plan = self.stage_plan(
+                        &parent.source,
+                        &profiling_ctx,
+                        chain,
+                        diversity_hint,
+                        &recent_directions,
                     )?;
-                    candidates.push(cand.clone());
-                    if best.as_ref().map(|cur| cand.latency_ms < cur.latency_ms).unwrap_or(true) {
-                        best = Some(cand.clone());
+                    recent_directions.push(plan.clone());
+
+                    let (cand, payload, last_error) =
+                        self.stage_execute_and_verify(&parent.source, &plan, chain, iteration)?;
+                    self.journal.record(&Event::CandidateEvaluated {
+                        iteration,
+                        chain,
+                        plan: plan.clone(),
+                        passed: cand.passed,
+                        latency_ms: cand.latency_ms,
+                        error: last_error.clone(),
+                        commit: None,
+                        change_summary: None,
+                        hints: None,
+                        evidence: None,
+                    })?;
+
+                    if cand.passed {
+                        // Summarizer → experience memory (paper §4.5).
+                        let speedup = cand
+                            .latency_ms
+                            .map(|m| baseline_ms / m)
+                            .unwrap_or(1.0);
+                        self.stage_summarize(
+                            baseline_payload.as_deref(),
+                            payload.as_deref(),
+                            &parent.source,
+                            &cand.source,
+                            &plan,
+                            speedup,
+                            iteration,
+                        )?;
+                        if best.as_ref().map(|cur| cand.latency_ms < cur.latency_ms).unwrap_or(true) {
+                            best = Some(cand.clone());
+                        }
+                        children.push(BeamNode {
+                            expansions: parent_expansions + 1,
+                            candidate: cand,
+                        });
                     }
                 }
             }
 
-            let beam = diverse_select(&candidates, self.cfg.hyper.b_beam as usize);
+            let beam = diverse_select_nodes(&children, self.cfg.hyper.b_beam as usize);
             if let Some(b) = beam.first() {
-                if let Some(ms) = b.latency_ms {
+                if let Some(ms) = b.candidate.latency_ms {
                     if ms < best_ms {
                         best_ms = ms;
                         no_improvement_streak = 0;
@@ -669,6 +711,9 @@ impl<'a> Pipeline<'a> {
                 }
             } else {
                 no_improvement_streak += 1;
+            }
+            if !beam.is_empty() {
+                frontier = beam;
             }
 
             if no_improvement_streak >= 2 {

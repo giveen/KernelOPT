@@ -202,8 +202,8 @@ Used by `run`, `run-ninfer`, `run-llamacpp`, `campaign`. Paper values in parenth
 | Option | Default | Meaning |
 |---|---|---|
 | `--iterations <T>` | `5` | Beam iterations for a single-target run (paper T=5). Campaign uses `--max-iterations`. |
-| `--plans <N>` | `4` | Plans generated per iteration (paper N=4). |
-| `--beam <B>` | `4` | Beam width / chains expanded per iteration (paper B=4). |
+| `--plans <N>` | `4` | Expansions per iteration, allocated across the beam by UCB(c=1.4) (paper N=4). |
+| `--beam <B>` | `4` | Beam width: frontier nodes kept per iteration by DiverseSelect (paper B=4). |
 | `--retries <K>` | `4` | Executor retries per plan, fed compile/correctness errors (paper K=4). |
 
 ### `kernelopt run <MODEL_FILE>`
