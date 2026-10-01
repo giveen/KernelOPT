@@ -146,6 +146,17 @@ pub fn allocate_expansions(arms: &[BeamNode], n_plans: u32, c: f64) -> Vec<usize
     out
 }
 
+/// How many expansions to spend this iteration. A single-node frontier (the
+/// root, before any beam exists) should not absorb the whole plan budget — the
+/// paper's N assumes a full beam, so ramp the first iteration.
+pub fn plans_for_frontier(n_plans: u32, frontier_len: usize) -> u32 {
+    if frontier_len <= 1 {
+        n_plans.min(2)
+    } else {
+        n_plans
+    }
+}
+
 fn libm_ln(x: f64) -> f64 {
     x.ln()
 }
@@ -307,6 +318,14 @@ mod tests {
     #[test]
     fn allocate_empty_beam_is_empty() {
         assert!(allocate_expansions(&[], 4, 1.4).is_empty());
+    }
+
+    #[test]
+    fn plans_for_frontier_ramps_the_first_iteration() {
+        assert_eq!(plans_for_frontier(4, 1), 2); // lone root arm: don't spend all 4
+        assert_eq!(plans_for_frontier(4, 2), 4); // real beam: full budget
+        assert_eq!(plans_for_frontier(1, 1), 1);
+        assert_eq!(plans_for_frontier(0, 3), 0);
     }
 
     #[test]
