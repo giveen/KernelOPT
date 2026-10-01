@@ -4,7 +4,7 @@ use kernelopt::attribution;
 use kernelopt::backend::{self, Backend, Target};
 use kernelopt::campaign::{self, CampaignOptions};
 use kernelopt::config::{self, Config, Hyper, ProfilerMode};
-use kernelopt::cuda_pipeline::{winner_summary, CudaPipeline, E2eConfig, EditMode, PipelineResult};
+use kernelopt::cuda_pipeline::{winner_summary, CudaPipeline, E2eConfig, EditMode, PipelineResult, DEFAULT_VERIFY_TIMEOUT_S};
 use kernelopt::journal::{format_event, Event, Journal};
 use kernelopt::llm::{self, LlmClient};
 use kernelopt::memory;
@@ -1263,6 +1263,7 @@ fn run_single(
         watch: opts.watch,
         bench_shape: opts.bench_shape,
         final_rounds: opts.final_rounds,
+        verify_timeout_s: std::cell::Cell::new(DEFAULT_VERIFY_TIMEOUT_S),
     };
     pipe.run()
 }

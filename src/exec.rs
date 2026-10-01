@@ -21,6 +21,13 @@ pub struct RunOut {
 /// Run with a timeout, capturing stdout/stderr on reader threads (so a full
 /// pipe can't deadlock the child) and killing it if it overruns.
 pub fn run_capture(cmd: &mut Command, timeout_secs: u64) -> Result<RunOut> {
+    // Own process group so a timeout can kill the whole tree (e.g. ctest → the
+    // test binary), not just the direct child — no orphaned GPU/CPU spinners.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -45,8 +52,7 @@ pub fn run_capture(cmd: &mut Command, timeout_secs: u64) -> Result<RunOut> {
         match child.try_wait()? {
             Some(st) => break st.code(),
             None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_tree(&mut child);
                 timed_out = true;
                 break None;
             }
@@ -59,6 +65,21 @@ pub fn run_capture(cmd: &mut Command, timeout_secs: u64) -> Result<RunOut> {
         stderr: eh.join().unwrap_or_default(),
         timed_out,
     })
+}
+
+/// Kill a child and everything in its process group. The group is created by
+/// `process_group(0)` in `run_capture`, so a tool that forks helpers (ctest →
+/// test binary, ninja → compilers) leaves nothing running after a timeout.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // Negative pid = process group (which equals the child's pid here).
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Gate 1: configure (optional) + build. Returns a `compile_view`-ready payload.

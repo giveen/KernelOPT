@@ -116,6 +116,7 @@ fn ninfer_identity_walk_add_bias() {
         watch: false,
         bench_shape: None,
         final_rounds: 1,
+        verify_timeout_s: std::cell::Cell::new(kernelopt::cuda_pipeline::DEFAULT_VERIFY_TIMEOUT_S),
     };
 
     let result = pipe.run().unwrap();
