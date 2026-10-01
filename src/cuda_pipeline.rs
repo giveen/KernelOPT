@@ -23,7 +23,7 @@ use crate::memory::{
     parse_summarizer_output, ExperienceItem, ExperienceMemory, MemoryUpdate, StrategyTracker,
 };
 use crate::runner_bridge::RunnerBridge;
-use crate::search::{diverse_select, meltdown_detected, Candidate};
+use crate::search::{allocate_expansions, diverse_select_nodes, meltdown_detected, BeamNode, Candidate};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1358,18 +1358,21 @@ impl<'a> CudaPipeline<'a> {
 
         // Beam frontier: start with the baseline as the root node. Chains expand
         // frontier nodes so improvements can compose (paper Algorithm 1).
-        let mut frontier: Vec<Candidate> = vec![Candidate {
-            id: "baseline".into(),
-            chain: 0,
-            iteration: 0,
-            source: baseline_source.clone(),
-            plan: "(baseline)".into(),
-            latency_ms: if baseline_ms > 0.0 { Some(baseline_ms) } else { None },
-            passed: true,
-            commit: None,
-            change_summary: None,
-            hints: None,
-            evidence: None,
+        let mut frontier: Vec<BeamNode> = vec![BeamNode {
+            expansions: 0,
+            candidate: Candidate {
+                id: "baseline".into(),
+                chain: 0,
+                iteration: 0,
+                source: baseline_source.clone(),
+                plan: "(baseline)".into(),
+                latency_ms: if baseline_ms > 0.0 { Some(baseline_ms) } else { None },
+                passed: true,
+                commit: None,
+                change_summary: None,
+                hints: None,
+                evidence: None,
+            },
         }];
 
         // Resume an interrupted target: restore the search state saved after the
@@ -1413,107 +1416,128 @@ impl<'a> CudaPipeline<'a> {
                 best.as_ref().and_then(|b| b.latency_ms).map(|m| format!("{m:.4} ms")).unwrap_or_else(|| "—".into()),
             ));
             let prev_best = best_ms;
-            let mut children: Vec<Candidate> = Vec::new();
+            let mut children: Vec<BeamNode> = Vec::new();
             let diversity_hint = meltdown_detected(&recent_directions, 6, 2);
 
-            // Expand each frontier node (the paper's beam). Chains build on the
-            // best-so-far rather than always restarting from the baseline.
-            for (chain, parent) in frontier.iter().enumerate() {
-                let chain_u = chain as u32;
-                if self.interrupted() {
-                    stop_reason = "interrupted";
-                    self.save_checkpoint(iteration, iterations_run, &best, best_ms, baseline_ms, &recent_directions, patience_used);
-                    break 'outer;
+            // Allocate this iteration's N plans across the beam by UCB(c): the
+            // best-latency arm draws more plans while underexpanded arms keep a
+            // bonus (paper §4.3). `pending[arm]` = plans assigned to each arm.
+            let slots = allocate_expansions(
+                &frontier,
+                self.cfg.hyper.n_plans,
+                self.cfg.hyper.ucb_c,
+            );
+            let mut pending = vec![0u32; frontier.len()];
+            for &a in &slots {
+                pending[a] += 1;
+            }
+
+            for (arm, &count) in pending.iter().enumerate() {
+                if count == 0 {
+                    continue;
                 }
-                if !self.budget_ok() {
-                    stop_reason = "budget";
-                    self.save_checkpoint(iteration, iterations_run, &best, best_ms, baseline_ms, &recent_directions, patience_used);
-                    break 'outer;
-                }
-                // Start from the parent node's source (its commit, or its content).
-                self.reset_worktree()?;
-                std::fs::write(self.target_path(), &parent.source)?;
-                let plan = self.stage_plan(
-                    &parent.source,
-                    &profiling_ctx,
-                    diversity_hint,
-                    &recent_directions,
-                )?;
-                if plan.change.is_empty() {
-                    self.progress(format!("  c{chain} no plan; skipping"));
+                let parent = frontier[arm].candidate.clone();
+                let parent_expansions = frontier[arm].expansions;
+                let chain_u = arm as u32;
+                for _ in 0..count {
+                    if self.interrupted() {
+                        stop_reason = "interrupted";
+                        self.save_checkpoint(iteration, iterations_run, &best, best_ms, baseline_ms, &recent_directions, patience_used);
+                        break 'outer;
+                    }
+                    if !self.budget_ok() {
+                        stop_reason = "budget";
+                        self.save_checkpoint(iteration, iterations_run, &best, best_ms, baseline_ms, &recent_directions, patience_used);
+                        break 'outer;
+                    }
+                    // Start from the parent node's source (its commit, or its content).
+                    self.reset_worktree()?;
+                    std::fs::write(self.target_path(), &parent.source)?;
+                    let plan = self.stage_plan(
+                        &parent.source,
+                        &profiling_ctx,
+                        diversity_hint,
+                        &recent_directions,
+                    )?;
+                    if plan.change.is_empty() {
+                        self.progress(format!("  c{arm} no plan; skipping"));
+                        self.journal.record(&Event::CandidateEvaluated {
+                            iteration,
+                            chain: chain_u,
+                            plan: "(no plan)".into(),
+                            passed: false,
+                            latency_ms: None,
+                            error: Some("planner produced no concrete plan".into()),
+                            commit: None,
+                            change_summary: None,
+                            hints: None,
+                            evidence: None,
+                        })?;
+                        continue;
+                    }
+                    recent_directions.push(plan.change.clone());
+                    self.progress(format!(
+                        "  c{arm} (from {}) plan: {}",
+                        parent.id,
+                        flatten(&plan.change)
+                    ));
+
+                    let (cand, last_error) =
+                        self.stage_execute_and_verify(&parent.source, &plan, chain_u, iteration)?;
                     self.journal.record(&Event::CandidateEvaluated {
                         iteration,
                         chain: chain_u,
-                        plan: "(no plan)".into(),
-                        passed: false,
-                        latency_ms: None,
-                        error: Some("planner produced no concrete plan".into()),
-                        commit: None,
-                        change_summary: None,
-                        hints: None,
-                        evidence: None,
+                        plan: plan.change.clone(),
+                        passed: cand.passed,
+                        latency_ms: cand.latency_ms,
+                        error: last_error.clone(),
+                        commit: cand.commit.clone(),
+                        change_summary: cand.change_summary.clone(),
+                        hints: cand.hints.clone(),
+                        evidence: cand.evidence.clone(),
                     })?;
-                    continue;
-                }
-                recent_directions.push(plan.change.clone());
-                self.progress(format!(
-                    "  c{chain} (from {}) plan: {}",
-                    parent.id,
-                    flatten(&plan.change)
-                ));
 
-                let (cand, last_error) =
-                    self.stage_execute_and_verify(&parent.source, &plan, chain_u, iteration)?;
-                self.journal.record(&Event::CandidateEvaluated {
-                    iteration,
-                    chain: chain_u,
-                    plan: plan.change.clone(),
-                    passed: cand.passed,
-                    latency_ms: cand.latency_ms,
-                    error: last_error.clone(),
-                    commit: cand.commit.clone(),
-                    change_summary: cand.change_summary.clone(),
-                    hints: cand.hints.clone(),
-                    evidence: cand.evidence.clone(),
-                })?;
-
-                if cand.passed {
-                    let speedup = cand
-                        .latency_ms
-                        .map(|m| if baseline_ms > 0.0 { baseline_ms / m } else { 1.0 })
-                        .unwrap_or(1.0);
-                    self.progress(format!(
-                        "  c{chain} ✓ {}{}",
-                        cand.latency_ms
-                            .map(|m| format!("{m:.4} ms"))
-                            .unwrap_or_else(|| "correct (no timing)".into()),
-                        if baseline_ms > 0.0 {
-                            format!(" · {speedup:.2}x")
-                        } else {
-                            String::new()
+                    if cand.passed {
+                        let speedup = cand
+                            .latency_ms
+                            .map(|m| if baseline_ms > 0.0 { baseline_ms / m } else { 1.0 })
+                            .unwrap_or(1.0);
+                        self.progress(format!(
+                            "  c{arm} ✓ {}{}",
+                            cand.latency_ms
+                                .map(|m| format!("{m:.4} ms"))
+                                .unwrap_or_else(|| "correct (no timing)".into()),
+                            if baseline_ms > 0.0 {
+                                format!(" · {speedup:.2}x")
+                            } else {
+                                String::new()
+                            }
+                        ));
+                        self.stage_summarize(&parent.source, &cand.source, &plan.change, speedup, iteration)?;
+                        if let Some(ms) = cand.latency_ms {
+                            if ms < best_ms {
+                                best_ms = ms;
+                            }
                         }
-                    ));
-                    self.stage_summarize(&parent.source, &cand.source, &plan.change, speedup, iteration)?;
-                    if let Some(ms) = cand.latency_ms {
-                        if ms < best_ms {
-                            best_ms = ms;
+                        if best
+                            .as_ref()
+                            .and_then(|b| b.latency_ms)
+                            .map(|b| cand.latency_ms.map(|c| c < b).unwrap_or(true))
+                            .unwrap_or(true)
+                        {
+                            best = Some(cand.clone());
                         }
+                        children.push(BeamNode {
+                            expansions: parent_expansions + 1,
+                            candidate: cand,
+                        });
+                    } else if let Some(err) = &last_error {
+                        self.progress(format!("  c{arm} ✗ {}", flatten(err)));
                     }
-                    if best
-                        .as_ref()
-                        .and_then(|b| b.latency_ms)
-                        .map(|b| cand.latency_ms.map(|c| c < b).unwrap_or(true))
-                        .unwrap_or(true)
-                    {
-                        best = Some(cand.clone());
-                    }
-                    children.push(cand);
-                } else if let Some(err) = &last_error {
-                    self.progress(format!("  c{chain} ✗ {}", flatten(err)));
                 }
             }
 
-            let selected = diverse_select(&children, self.cfg.hyper.b_beam as usize);
+            let selected = diverse_select_nodes(&children, self.cfg.hyper.b_beam as usize);
             if !selected.is_empty() {
                 frontier = selected;
             }

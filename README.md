@@ -31,7 +31,7 @@ discover ─▶ baseline ─▶ ┌ plan ─▶ edit ─▶ compile ─▶ corre
 ```
 
 LLM agents (Planner → Executor → Summarizer) work with an NCU/Graphsignal-guided
-beam search and shared experience memory. Five gates filter candidates: static
+UCB-guided beam search and shared experience memory. Five gates filter candidates: static
 compile, multi-seed correctness, **model-level (engine) verification**, a
 performance gate (pinned shape, interleaved fresh baseline/candidate rounds, a
 noise floor and a sign test), and **measured-shape correctness** — the op's own

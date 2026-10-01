@@ -160,7 +160,7 @@ kernelopt run-ninfer --op linear_add --repo "$NINFER_REPO" \
 1. `discover`: parse `src/ops/<family>/` — kernel files, launcher, contract header, test names,
    bench binary name (from `bench/ops/benchmarks.cmake`).
 2. `baseline`: build clean → run tests (must pass before anything) → bench sweep → ncu context.
-3. Beam loop (paper Algorithm 1: T×N×B×K, DiverseSelect, meltdown detector): plan → edit
+3. Beam loop (paper Algorithm 1: T×N×B×K, UCB plan allocation, DiverseSelect, meltdown detector): plan → edit
    worktree kernel → compile → test → bench → summarize→memory.
 4. Gates 3–4: `ninfer_bench` E2E (optional) + perf sweep γ=1.03.
 5. Report + `cuda_diff`; journal every step; resumable via `kernelopt resume` (unchanged).

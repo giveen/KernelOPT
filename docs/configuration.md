@@ -79,6 +79,7 @@ reasoning_effort = "low"        # overridden by --reasoning-effort / .env
 
 ## Paper hyperparameters
 
-All overridable per command: `T=5`, `N=4`, `K=4`, `B=4`, `γ=1.03`, memory `Q=8`,
-`s+=1.05`, `s−=1.20`. On the CLI these are `--iterations` (T), `--plans` (N),
-`--retries` (K), `--beam` (B); the performance margin γ is fixed in `config.rs`.
+All overridable per command: `T=5`, `N=4`, `K=4`, `B=4`, UCB `c=1.4`, `γ=1.03`,
+memory `Q=8`, `s+=1.05`, `s−=1.20`. On the CLI these are `--iterations` (T), `--plans` (N),
+`--retries` (K), `--beam` (B); the UCB exploration constant and the performance margin γ
+are fixed in `config.rs`.
