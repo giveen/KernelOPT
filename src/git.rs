@@ -77,12 +77,24 @@ pub fn create(repo: &Path, worktree: &Path, branch: &str, base: &str) -> Result<
         let _ = git(repo, &["worktree", "prune"]);
     }
 
-    let o = git(repo, &["worktree", "add", "-B", branch, &wt, &base_sha])?;
+    // A registered worktree whose directory is gone (a crashed or interrupted
+    // run) shows as `prunable` but still makes `worktree add` fail with
+    // "already used by worktree". Prune first, and retry once if we still
+    // collide with a registration.
+    let _ = git(repo, &["worktree", "prune"]);
+    let mut o = git(repo, &["worktree", "add", "-B", branch, &wt, &base_sha])?;
     if !o.status.success() {
-        bail!(
-            "git worktree add failed: {}",
-            tail(String::from_utf8_lossy(&o.stderr).as_ref(), 600)
-        );
+        let err = String::from_utf8_lossy(&o.stderr).to_string();
+        if err.contains("already used by worktree") || err.contains("already checked out") {
+            let _ = git(repo, &["worktree", "prune"]);
+            o = git(repo, &["worktree", "add", "-B", branch, &wt, &base_sha])?;
+        }
+        if !o.status.success() {
+            bail!(
+                "git worktree add failed: {}",
+                tail(String::from_utf8_lossy(&o.stderr).as_ref(), 600)
+            );
+        }
     }
     Ok(json!({"ok": true, "worktree": wt, "branch": branch, "base": base_sha, "head": base_sha}))
 }
@@ -224,4 +236,51 @@ pub fn apply_patch(worktree: &Path, patch: &str) -> Result<Value> {
         bail!("patch_apply: {}", tail(&msg, 1000));
     }
     Ok(json!({"ok": true, "applied": true}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let o = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .expect("spawn git");
+        assert!(
+            o.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+
+    /// A worktree whose directory was deleted leaves a `prunable` registration
+    /// that makes `worktree add` fail; `create` must prune and recover.
+    #[test]
+    fn create_recovers_from_missing_worktree_dir() {
+        let root = std::env::temp_dir()
+            .join(format!("kernelopt-git-{}", uuid::Uuid::new_v4().simple()));
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_ok(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        git_ok(&repo, &["add", "-A"]);
+        git_ok(&repo, &["commit", "-q", "-m", "init"]);
+
+        let wt = root.join("wt");
+        assert_eq!(create(&repo, &wt, "kernelopt/test", "HEAD").unwrap()["ok"], json!(true));
+        // Simulate a crashed run: directory gone, registration remains.
+        std::fs::remove_dir_all(&wt).unwrap();
+        let v = create(&repo, &wt, "kernelopt/test", "HEAD").unwrap();
+        assert_eq!(v["ok"], json!(true));
+        assert!(wt.join("f.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
