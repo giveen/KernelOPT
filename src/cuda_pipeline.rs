@@ -388,6 +388,19 @@ impl<'a> CudaPipeline<'a> {
     /// Run the engine (deterministic greedy generation) and capture its result.
     fn run_engine(&self) -> Result<E2eResult> {
         let e2e = self.e2e.as_ref().context("no engine E2E config")?;
+        // Preflight: a model bigger than free VRAM will OOM while loading. Fail
+        // fast with an actionable message instead of a bare cudaMalloc error.
+        if let (Some(size), Some(free)) =
+            (crate::exec::model_size_gb(&e2e.model), crate::exec::free_gpu_gb())
+        {
+            if size > free {
+                anyhow::bail!(
+                    "engine model {} is ~{size:.1} GB but only {free:.1} GB VRAM is free — Gate 3 \
+                     cannot run (free memory, choose a smaller model, or drop --e2e-weights)",
+                    e2e.model
+                );
+            }
+        }
         let resp = self.gpu_call_timeout(
             "engine_generate",
             json!({
@@ -403,10 +416,23 @@ impl<'a> CudaPipeline<'a> {
             1000,
         )?;
         if resp["ok"] != json!(true) {
-            anyhow::bail!(
+            let mut msg = format!(
                 "engine_generate failed: {}",
                 resp["error"]["message"].as_str().unwrap_or("unknown")
             );
+            let lower = msg.to_ascii_lowercase();
+            if lower.contains("memory") || lower.contains("cudamalloc") || lower.contains("out of memory")
+            {
+                if let Some(free) = crate::exec::free_gpu_gb() {
+                    let size = crate::exec::model_size_gb(&e2e.model).unwrap_or(0.0);
+                    msg.push_str(&format!(
+                        "\n  hint: engine model {} (~{size:.1} GB on disk); ~{free:.1} GB VRAM free \
+                         now — likely out of memory",
+                        e2e.model
+                    ));
+                }
+            }
+            anyhow::bail!(msg);
         }
         Ok(E2eResult {
             digest: resp["digest"].as_str().unwrap_or_default().to_string(),
@@ -488,13 +514,35 @@ impl<'a> CudaPipeline<'a> {
             });
             0.0
         };
-        if self.e2e.is_some() {
-            let res = self.run_engine().context("engine baseline (Gate 3)")?;
-            self.journal.record(&Event::StageCompleted {
-                stage: "engine_baseline".into(),
-                data: json!({"digest": res.digest, "elapsed_s": res.elapsed_s, "text": res.text}),
-            })?;
-            self.baseline_e2e = Some(res);
+        if let Some((model, engine)) = self.e2e.as_ref().map(|e| (e.model.clone(), e.engine.clone())) {
+            match self.run_engine() {
+                Ok(res) => {
+                    self.journal.record(&Event::StageCompleted {
+                        stage: "engine_baseline".into(),
+                        data: json!({
+                            "model": model, "engine": engine,
+                            "digest": res.digest, "elapsed_s": res.elapsed_s, "text": res.text,
+                        }),
+                    })?;
+                    self.baseline_e2e = Some(res);
+                }
+                Err(e) => {
+                    // Gate 3 is opt-in and optional: an engine that can't run
+                    // (e.g. OOM loading weights) must not discard the whole run.
+                    // Disable it and continue with the op-level search.
+                    self.progress(format!(
+                        "· engine baseline (Gate 3) failed — disabling Gate 3 and continuing: {e:#}"
+                    ));
+                    self.journal.record(&Event::StageCompleted {
+                        stage: "engine_baseline".into(),
+                        data: json!({
+                            "model": model, "engine": engine,
+                            "disabled": true, "error": format!("{e:#}"),
+                        }),
+                    })?;
+                    self.e2e = None;
+                }
+            }
         }
         Ok(baseline_ms)
     }

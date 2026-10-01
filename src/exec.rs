@@ -556,6 +556,46 @@ fn compute_cap_digits(s: &str) -> Option<String> {
     (!digits.is_empty()).then_some(digits)
 }
 
+/// Free GPU memory in GB (NVIDIA, first device) — best effort.
+pub fn free_gpu_gb() -> Option<f64> {
+    let out = Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mib: f64 = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(mib / 1024.0)
+}
+
+/// Estimated on-disk size of a model path in GB (a file, or the summed files of
+/// a directory). `None` for a bare name / missing path.
+pub fn model_size_gb(path: &str) -> Option<f64> {
+    let meta = std::fs::metadata(path).ok()?;
+    let bytes = if meta.is_file() {
+        meta.len()
+    } else if meta.is_dir() {
+        let mut total = 0u64;
+        for entry in std::fs::read_dir(path).ok()? {
+            if let Ok(m) = entry.ok()?.metadata() {
+                if m.is_file() {
+                    total += m.len();
+                }
+            }
+        }
+        total
+    } else {
+        return None;
+    };
+    (bytes > 0).then_some(bytes as f64 / 1e9)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,6 +605,17 @@ mod tests {
         assert_eq!(compute_cap_digits("12.0\n"), Some("120".into()));
         assert_eq!(compute_cap_digits("9.0"), Some("90".into()));
         assert_eq!(compute_cap_digits("n/a"), None);
+    }
+
+    #[test]
+    fn model_size_gb_reads_files() {
+        assert_eq!(model_size_gb("/no/such/path/does-not-exist"), None);
+        let f = std::env::temp_dir()
+            .join(format!("kopt-size-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&f, vec![0u8; 2_000_000]).unwrap();
+        let gb = model_size_gb(&f.to_string_lossy()).unwrap();
+        assert!((gb - 0.002).abs() < 1e-6, "{gb}");
+        let _ = std::fs::remove_file(&f);
     }
 
     #[test]
