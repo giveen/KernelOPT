@@ -1492,8 +1492,8 @@ fn wizard(
     } else {
         choose_preset()?
     };
-    let (iterations, beam) = kernelopt::wizard::preset(&preset);
-    println!("· preset: {preset} ({iterations} iterations, beam {beam})");
+    let (iterations, beam, plans) = kernelopt::wizard::preset(&preset);
+    println!("· preset: {preset} ({iterations} iterations, beam {beam}, {plans} plans)");
 
     // Optionally persist the choices so later plain runs pick them up.
     if save {
@@ -1508,6 +1508,7 @@ fn wizard(
             ("KERNELOPT_MODEL".into(), model.clone()),
             ("KERNELOPT_ITERATIONS".into(), iterations.to_string()),
             ("KERNELOPT_BEAM".into(), beam.to_string()),
+            ("KERNELOPT_PLANS".into(), plans.to_string()),
         ];
         if let Some(k) = repo_key {
             pairs.insert(0, (k.into(), repo.to_string_lossy().to_string()));
@@ -1534,6 +1535,7 @@ fn wizard(
         e2e,
         iterations,
         beam,
+        plans,
         watch: true,
     };
 
