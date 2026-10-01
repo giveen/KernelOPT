@@ -16,9 +16,11 @@ candidate: same command on the rebuilt engine
              → digest must MATCH, wall time must be ≤ γ × baseline
 ```
 
-- **Correctness** — deterministic greedy decoding (fixed seed, temperature 0) is
-  reproducible, so the output digest is identical **iff** the kernel change
-  preserved the model's semantics.
+- **Correctness** — matching output digests establish agreement on the tested
+  prompt and decoding configuration. They do not prove model-wide semantic
+  equivalence: unexercised paths or numerical changes can leave greedy output
+  unchanged. See the [RST recommendations](testing-kernel-wins.md) for controls
+  and limits on interpreting a passing check.
 - **Performance** — the same run is timed; a candidate slower than baseline by
   more than γ (1.03) fails, catching "faster kernel, slower model".
 - **Numeric option** — perplexity gives a stronger numeric comparison where the
