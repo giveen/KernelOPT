@@ -2149,13 +2149,16 @@ impl<'a> CudaPipeline<'a> {
         let Some(shape) = parse_bench_shape(self.last_bench_label.as_deref()) else {
             return Ok(ShapeGate::Skipped("no parseable bench shape".into()));
         };
+        // The measured shape plus tail/boundary variants the pinned shape misses
+        // (odd/ragged dims exercise the guards a vectorized fast path may drop).
+        let shapes = shape_variants(&shape);
         let mut chosen: Option<(String, String, String)> = None;
         for rel in &self.target.test_sources {
             let path = self.worktree.join(rel);
             let Ok(original) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            if let Some(patched) = append_shape_case(&original, &self.target.op, &shape) {
+            if let Some(patched) = append_shape_cases(&original, &self.target.op, &shapes) {
                 chosen = Some((rel.clone(), original, patched));
                 break;
             }
@@ -2166,13 +2169,13 @@ impl<'a> CudaPipeline<'a> {
         let path = self.worktree.join(&rel);
         let base_ref = self.base_sha.clone().unwrap_or_else(|| "HEAD".into());
 
-        // 1) Validate the generated case against the baseline (trusted-correct).
+        // 1) Validate the generated cases against the baseline (trusted-correct).
         self.revert_ref(&base_ref)?;
         std::fs::write(&path, &patched)?;
         let _ = self.compile_now()?;
         let base = self.verify_now()?;
 
-        // 2) The same case against the candidate.
+        // 2) The same cases against the candidate.
         self.materialize_winner(best)?;
         std::fs::write(&path, &patched)?;
         let _ = self.compile_now()?;
@@ -2183,23 +2186,41 @@ impl<'a> CudaPipeline<'a> {
         self.materialize_winner(best)?;
         let _ = self.compile_now()?;
 
-        let base_passed = base["passed"] == json!(true);
-        let cand_passed = cand["passed"] == json!(true);
+        let fail_names = |v: &serde_json::Value| -> Vec<String> {
+            v["failing_cases"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| c["name"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let base_fail = fail_names(&base);
+        let cand_fail = fail_names(&cand);
+        // A regression is a case the candidate fails but the baseline passes;
+        // cases the baseline also fails are unsupported and ignored.
+        let regressed: Vec<String> = cand_fail
+            .iter()
+            .filter(|c| !base_fail.contains(c))
+            .cloned()
+            .collect();
+        let cases_validated = shapes.len().saturating_sub(base_fail.len());
         let detail = json!({
             "shape": self.last_bench_label,
-            "case_dims": shape,
+            "case_dims": shapes,
             "source": rel,
-            "baseline_passed": base_passed,
-            "candidate_passed": cand_passed,
-            "baseline_failures": base["failing_cases"],
-            "candidate_failures": cand["failing_cases"],
+            "cases_validated": cases_validated,
+            "baseline_failures": base_fail,
+            "candidate_failures": cand_fail,
+            "candidate_regressions": regressed,
         });
-        if !base_passed {
+        if cases_validated == 0 {
             return Ok(ShapeGate::Skipped(format!(
-                "baseline failed the generated case (gate not used): {detail}"
+                "baseline failed every generated case (gate not used): {detail}"
             )));
         }
-        if !cand_passed {
+        if !regressed.is_empty() {
             return Ok(ShapeGate::Failed(detail));
         }
         Ok(ShapeGate::Passed(detail))
@@ -2631,6 +2652,43 @@ fn matching_paren(s: &str, open_byte: usize) -> Option<usize> {
     None
 }
 
+/// Boundary shape variants around the measured shape: the measured shape, one
+/// decrement per dim (odd/ragged tails that exercise guards), and a tiny shape.
+/// Invalid variants are filtered later — the baseline must pass a case before
+/// it is trusted.
+fn shape_variants(shape: &[i64]) -> Vec<Vec<i64>> {
+    let mut out: Vec<Vec<i64>> = vec![shape.to_vec()];
+    for i in 0..shape.len() {
+        if shape[i] > 1 {
+            let mut v = shape.to_vec();
+            v[i] -= 1;
+            if !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+    let small: Vec<i64> = shape.iter().map(|d| (*d).clamp(1, 3)).collect();
+    if !out.contains(&small) {
+        out.push(small);
+    }
+    out.truncate(5);
+    out
+}
+
+/// Append a `run_case` for every variant (see `append_shape_case`). Returns
+/// `None` if none could be appended.
+fn append_shape_cases(source: &str, op: &str, shapes: &[Vec<i64>]) -> Option<String> {
+    let mut cur = source.to_string();
+    let mut added = 0;
+    for s in shapes {
+        if let Some(next) = append_shape_case(&cur, op, s) {
+            cur = next;
+            added += 1;
+        }
+    }
+    (added > 0).then_some(cur)
+}
+
 /// Append an extra `run_case(...)` for the measured shape to a ninfer op test.
 ///
 /// Reuses the *last* existing call so argument positions are preserved (the
@@ -2985,5 +3043,15 @@ mod verify_timeout_tests {
         assert_eq!(s.len(), 2); // base-only shape is excluded
         assert!((s["aligned"] - 628.0 / 600.0).abs() < 1e-9);
         assert!((s["misaligned"] - 860.0 / 647.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn shape_variants_are_bounded_and_deduped() {
+        let v = shape_variants(&[4304, 65536]);
+        assert_eq!(v[0], vec![4304, 65536]);
+        assert!(v.contains(&vec![4303, 65536]));
+        assert!(v.contains(&vec![4304, 65535]));
+        assert!(v.len() <= 5);
+        assert_eq!(shape_variants(&[1, 1]), vec![vec![1, 1]]);
     }
 }
