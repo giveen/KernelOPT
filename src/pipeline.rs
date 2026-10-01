@@ -275,6 +275,7 @@ impl<'a> Pipeline<'a> {
         plan: &str,
         chain_idx: u32,
         iteration: u32,
+        plan_no: u32,
     ) -> Result<(Candidate, Option<String>, Option<String>)> {
         // (candidate, graphsignal payload, last_error) — error is journaled.
         let system = self.render_prompt("executor.md", &json!({}))?;
@@ -356,7 +357,7 @@ impl<'a> Pipeline<'a> {
                 let payload = bench.get("graphsignal").and_then(|g| g.get("payload")).cloned();
                 return Ok((
                     Candidate {
-                        id: format!("i{iteration}_c{chain_idx}_a{attempt}"),
+                        id: format!("i{iteration}_c{chain_idx}_p{plan_no}_a{attempt}"),
                         chain: chain_idx,
                         iteration,
                         source: candidate_source,
@@ -392,7 +393,7 @@ impl<'a> Pipeline<'a> {
 
         Ok((
             Candidate {
-                id: format!("i{iteration}_c{chain_idx}_failed"),
+                id: format!("i{iteration}_c{chain_idx}_p{plan_no}_failed"),
                 chain: chain_idx,
                 iteration,
                 source: String::new(),
@@ -641,6 +642,7 @@ impl<'a> Pipeline<'a> {
                 pending[a] += 1;
             }
 
+            let mut plan_no: u32 = 0;
             for (arm, &count) in pending.iter().enumerate() {
                 if count == 0 {
                     continue;
@@ -649,6 +651,8 @@ impl<'a> Pipeline<'a> {
                 let parent_expansions = frontier[arm].expansions;
                 let chain = arm as u32;
                 for _ in 0..count {
+                    let this_plan = plan_no;
+                    plan_no += 1;
                     let plan = self.stage_plan(
                         &parent.source,
                         &profiling_ctx,
@@ -659,7 +663,7 @@ impl<'a> Pipeline<'a> {
                     recent_directions.push(plan.clone());
 
                     let (cand, payload, last_error) =
-                        self.stage_execute_and_verify(&parent.source, &plan, chain, iteration)?;
+                        self.stage_execute_and_verify(&parent.source, &plan, chain, iteration, this_plan)?;
                     self.journal.record(&Event::CandidateEvaluated {
                         iteration,
                         chain,
