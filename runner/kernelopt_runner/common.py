@@ -33,8 +33,3 @@ def get_model_and_inputs(module: types.ModuleType, inputs_fn: str = "get_inputs"
     if not isinstance(inputs, (list, tuple)):
         inputs = [inputs]
     return model, list(inputs)
-
-
-def call_with_inputs(model, inputs):
-    """Call model with a list/tuple of positional inputs."""
-    return model(*inputs)

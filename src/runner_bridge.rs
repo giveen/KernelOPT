@@ -6,27 +6,8 @@
 //! own /signals payload before exit.
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::path::Path;
 use std::process::{Command, Stdio};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunnerError {
-    pub kind: String, // compile | runtime | correctness | timeout | protocol
-    pub message: String,
-    pub traceback: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunnerResponse {
-    pub ok: bool,
-    #[serde(default)]
-    pub error: Option<RunnerError>,
-    #[serde(flatten)]
-    pub payload: serde_json::Value,
-    pub protocol: Option<u32>,
-}
 
 pub struct RunnerBridge {
     pub runner_dir: std::path::PathBuf,
@@ -201,13 +182,4 @@ fn wait_with_timeout(
             }
         }
     }
-}
-
-/// Ensure the runner dir exists relative to the project root.
-pub fn locate_runner(start: &Path) -> std::path::PathBuf {
-    let candidate = start.join("runner");
-    if candidate.exists() {
-        return candidate;
-    }
-    start.join("runner")
 }

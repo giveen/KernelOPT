@@ -86,14 +86,6 @@ impl Journal {
         Ok(Self { path, file })
     }
 
-    pub fn open_existing(runs_dir: &Path, run_id: &str) -> Result<Self> {
-        let dir = runs_dir.join(run_id);
-        let path = dir.join("journal.jsonl");
-        let file = OpenOptions::new().append(true).open(&path)
-            .with_context(|| format!("opening journal {}", path.display()))?;
-        Ok(Self { path, file })
-    }
-
     pub fn record(&mut self, event: &Event) -> Result<()> {
         // Add a timestamp without changing the event enum (replay ignores extras).
         let mut value = serde_json::to_value(event)?;

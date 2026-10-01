@@ -147,20 +147,6 @@ pub fn commit(worktree: &Path, message: &str, tag: Option<&str>) -> Result<Value
     Ok(json!({"ok": true, "sha": sha, "tag": tag, "message": message}))
 }
 
-/// Recent commits as `[{sha, subject}]`.
-pub fn log(worktree: &Path, n: usize, r: &str) -> Result<Value> {
-    let o = git(worktree, &["log", "--oneline", "-n", &n.to_string(), r])?;
-    let commits: Vec<Value> = stdout(&o)
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|line| {
-            let (sha, subject) = line.split_once(' ').unwrap_or((line, ""));
-            json!({"sha": sha, "subject": subject})
-        })
-        .collect();
-    Ok(json!({"ok": true, "commits": commits}))
-}
-
 /// `{dirty, porcelain}` for the worktree.
 pub fn status(worktree: &Path) -> Result<Value> {
     let o = git(worktree, &["status", "--porcelain"])?;
