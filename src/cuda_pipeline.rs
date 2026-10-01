@@ -186,21 +186,6 @@ struct Checkpoint {
 }
 
 impl<'a> CudaPipeline<'a> {
-    fn call(&self, command: &str, mut req: serde_json::Value) -> Result<serde_json::Value> {
-        req["command"] = json!(command);
-        self.runner.call(&req)
-    }
-
-    fn call_timeout(
-        &self,
-        command: &str,
-        mut req: serde_json::Value,
-        secs: u64,
-    ) -> Result<serde_json::Value> {
-        req["command"] = json!(command);
-        self.runner.call_with_timeout(&req, secs)
-    }
-
     /// Run a GPU-touching runner command under the cross-process GPU lock, so
     /// only one bench/verify/ncu/e2e runs on the device at a time (also across
     /// separate `kernelopt` processes).

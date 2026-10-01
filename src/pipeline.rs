@@ -194,7 +194,7 @@ impl<'a> Pipeline<'a> {
         &mut self,
         kernel_source: &str,
         profiling_ctx: &serde_json::Value,
-        chain_idx: u32,
+        _chain_idx: u32,
         diversity_hint: bool,
         recent_directions: &[String],
     ) -> Result<String> {
@@ -601,7 +601,6 @@ impl<'a> Pipeline<'a> {
                 kernel_file_text.clone()
             });
         let mut best: Option<Candidate> = None;
-        let mut best_payload: Option<String> = None;
         let mut recent_directions: Vec<String> = Vec::new();
         let mut no_improvement_streak = 0u32;
         let mut best_ms = baseline_ms;
@@ -653,7 +652,6 @@ impl<'a> Pipeline<'a> {
                     candidates.push(cand.clone());
                     if best.as_ref().map(|cur| cand.latency_ms < cur.latency_ms).unwrap_or(true) {
                         best = Some(cand.clone());
-                        best_payload = payload.clone();
                     }
                 }
             }
