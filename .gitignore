@@ -38,3 +38,5 @@ runner/torch_compile_debug/
 
 # --- Local tooling ----------------------------------------------------------
 .freebuff/
+# codebase-memory-mcp index artifact (regenerable; machine-local)
+.codebase-memory/
