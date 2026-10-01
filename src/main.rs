@@ -983,7 +983,7 @@ fn main() -> Result<()> {
             let last = events
                 .iter()
                 .filter_map(|e| match e {
-                    Event::RunFinished { outcome, speedup, root_cause } => Some(format!(
+                    Event::RunFinished { outcome, speedup, root_cause, .. } => Some(format!(
                         "already finished: outcome={outcome} speedup={speedup:?} cause={root_cause:?}"
                     )),
                     Event::StageCompleted { stage, .. } => Some(format!("completed stage: {stage}")),
@@ -1264,6 +1264,7 @@ fn run_single(
         bench_shape: opts.bench_shape,
         final_rounds: opts.final_rounds,
         verify_timeout_s: std::cell::Cell::new(DEFAULT_VERIFY_TIMEOUT_S),
+        recent_failures: Vec::new(),
     };
     pipe.run()
 }
@@ -1752,7 +1753,7 @@ fn analyze_run(run_id: &str, json: bool) -> Result<()> {
                 e.0 += 1;
                 e.1 += prompt_tokens + completion_tokens;
             }
-            Event::RunFinished { outcome: o, speedup, root_cause } => {
+            Event::RunFinished { outcome: o, speedup, root_cause, .. } => {
                 outcome = Some((o.clone(), *speedup, root_cause.clone()));
             }
             _ => {}
@@ -2051,7 +2052,7 @@ fn print_report(run_id: &str, events: &[Event]) {
             Event::GatesVerdict { passed, detail, .. } => {
                 println!("- gates: {} — `{}`", if *passed { "PASS" } else { "REJECT" }, detail);
             }
-            Event::RunFinished { outcome, speedup, root_cause } => {
+            Event::RunFinished { outcome, speedup, root_cause, .. } => {
                 println!("\n## outcome: {outcome}");
                 if let Some(s) = speedup {
                     println!("speedup: {s:.3}x");

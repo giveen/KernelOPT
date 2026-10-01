@@ -57,6 +57,19 @@ fn adaptive_verify_timeout(baseline: std::time::Duration) -> u64 {
         .clamp(VERIFY_TIMEOUT_FLOOR_S, VERIFY_TIMEOUT_CEIL_S)
 }
 
+/// First non-empty, truncated line of a failure — a stable-ish signature used
+/// both to dedup the Planner's failure memory and to detect a repeated
+/// (non-progressing) executor attempt.
+fn error_signature(error: &str) -> String {
+    let first = error.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    truncate_chars(first, 160)
+}
+
+/// `<category>: <signature>` as stored in the Planner's failure memory.
+fn failure_signature(category: &str, error: &str) -> String {
+    format!("{category}: {}", error_signature(error))
+}
+
 pub struct CudaPipeline<'a> {
     pub cfg: &'a Config,
     pub llm: &'a dyn LlmClient,
@@ -90,6 +103,9 @@ pub struct CudaPipeline<'a> {
     /// Correctness/verify timeout in seconds, calibrated from the baseline on
     /// the first verify so a hung candidate can't burn the flat default.
     pub verify_timeout_s: std::cell::Cell<u64>,
+    /// Compact signatures of recent failed attempts, fed to the Planner so it
+    /// stops repeating dead ends (e.g. the same CUB API that won't compile).
+    pub recent_failures: Vec<String>,
     /// Effective bandwidth (GB/s) of the most recent bench's representative shape.
     pub last_bench_gbs: Option<f64>,
     /// Device memory roofline (GB/s) reported by the most recent bench.
@@ -229,6 +245,24 @@ impl<'a> CudaPipeline<'a> {
                 completion_tokens: u.completion_tokens,
             });
         }
+    }
+
+    /// Remember a failed attempt (deduped, last few kept) so the next Planner
+    /// call sees concrete dead ends instead of restating them. Returns `true`
+    /// when this exactly repeats the previous *compile* failure — no progress,
+    /// so the caller should stop retrying and save the rebuilds.
+    fn record_failure(&mut self, category: &str, error: &str, prev: &mut Option<String>) -> bool {
+        let sig = failure_signature(category, error);
+        let repeated_compile = category == "compile" && prev.as_deref() == Some(sig.as_str());
+        *prev = Some(sig.clone());
+        if !self.recent_failures.contains(&sig) {
+            self.recent_failures.push(sig);
+            let n = self.recent_failures.len();
+            if n > 6 {
+                self.recent_failures.drain(0..n - 6);
+            }
+        }
+        repeated_compile
     }
 
     fn budget_ok(&self) -> bool {
@@ -705,6 +739,13 @@ impl<'a> CudaPipeline<'a> {
                 ""
             },
         ));
+        if !self.recent_failures.is_empty() {
+            user.push_str(&format!(
+                "\n\nRECENT FAILURES (do NOT repeat these; if a direction is still right, \
+                 fix the specific error rather than restating it):\n{}",
+                self.recent_failures.join("\n")
+            ));
+        }
 
         let tools = vec![
             ToolDef {
@@ -907,6 +948,9 @@ impl<'a> CudaPipeline<'a> {
         }];
 
         let mut last_error: Option<String> = None;
+        // Signature of the previous failure, for detecting a repeated compile
+        // error (no progress → stop paying for rebuilds).
+        let mut last_fail_sig: Option<String> = None;
 
         for attempt in 0..self.cfg.hyper.k_retries {
             let user = match &last_error {
@@ -953,6 +997,7 @@ impl<'a> CudaPipeline<'a> {
                                 category: "patch_apply".into(),
                                 error: err.clone(),
                             })?;
+                            let _ = self.record_failure("patch_apply", &err, &mut last_fail_sig);
                             last_error = Some(err);
                             continue;
                         }
@@ -976,6 +1021,7 @@ impl<'a> CudaPipeline<'a> {
                         category: "no_tool_call".into(),
                         error: err.clone(),
                     })?;
+                    let _ = self.record_failure("no_tool_call", &err, &mut last_fail_sig);
                     last_error = Some(err);
                     continue;
                 }
@@ -1000,6 +1046,7 @@ impl<'a> CudaPipeline<'a> {
                     category: "no_change".into(),
                     error: err.clone(),
                 })?;
+                let _ = self.record_failure("no_change", &err, &mut last_fail_sig);
                 last_error = Some(err);
                 continue;
             }
@@ -1027,8 +1074,19 @@ impl<'a> CudaPipeline<'a> {
                     category: "compile".into(),
                     error: err.clone(),
                 })?;
+                let repeated = self.record_failure("compile", &err, &mut last_fail_sig);
                 last_error = Some(err);
-                self.tracker.record(&self.target.family.clone(), "candidate", false);
+                self.tracker.record(
+                    &self.target.family.clone(),
+                    &crate::memory::strategy_tag(&plan.change),
+                    false,
+                );
+                if repeated {
+                    self.progress(format!(
+                        "  c{chain_idx} ✗ repeated compile error — stopping retries for this plan"
+                    ));
+                    break;
+                }
                 continue;
             }
 
@@ -1043,8 +1101,13 @@ impl<'a> CudaPipeline<'a> {
                     category: "correctness".into(),
                     error: err.clone(),
                 })?;
+                let _ = self.record_failure("correctness", &err, &mut last_fail_sig);
                 last_error = Some(err);
-                self.tracker.record(&self.target.family.clone(), "candidate", false);
+                self.tracker.record(
+                    &self.target.family.clone(),
+                    &crate::memory::strategy_tag(&plan.change),
+                    false,
+                );
                 continue;
             }
 
@@ -1060,6 +1123,7 @@ impl<'a> CudaPipeline<'a> {
                             category: "bench".into(),
                             error: err.clone(),
                         })?;
+                        let _ = self.record_failure("bench", &err, &mut last_fail_sig);
                         last_error = Some(err);
                         continue;
                     }
@@ -1067,7 +1131,11 @@ impl<'a> CudaPipeline<'a> {
             } else {
                 None
             };
-            self.tracker.record(&self.target.family.clone(), "candidate", true);
+            self.tracker.record(
+                &self.target.family.clone(),
+                &crate::memory::strategy_tag(&plan.change),
+                true,
+            );
             let id = format!("i{iteration}_c{chain_idx}_a{attempt}");
             // Commit the accepted candidate so it can be reverted to / read later.
             let commit = self.commit_candidate(&id, &plan.change, latency_ms);
@@ -1434,6 +1502,7 @@ impl<'a> CudaPipeline<'a> {
                 outcome: "paused".into(),
                 speedup: None,
                 root_cause: Some(cause.into()),
+                stop_reason: Some(stop_reason.into()),
             })?;
             return Ok(PipelineResult {
                 outcome: "paused".into(),
@@ -1459,6 +1528,7 @@ impl<'a> CudaPipeline<'a> {
                     outcome: "fallback".into(),
                     speedup: None,
                     root_cause: Some(cause.into()),
+                    stop_reason: Some(stop_reason.into()),
                 })?;
                 Ok(PipelineResult {
                     outcome: "fallback".into(),
@@ -1670,6 +1740,7 @@ impl<'a> CudaPipeline<'a> {
             outcome: outcome.into(),
             speedup,
             root_cause: root_cause.clone(),
+            stop_reason: Some(stop_reason.into()),
         })?;
         self.clear_checkpoint();
         let summary = json!({
@@ -1727,6 +1798,7 @@ impl<'a> CudaPipeline<'a> {
             outcome: "fallback".into(),
             speedup: None,
             root_cause: Some(cause.into()),
+            stop_reason: Some("baseline".into()),
         })?;
         self.clear_checkpoint();
         Ok(PipelineResult {
@@ -1783,8 +1855,11 @@ impl<'a> CudaPipeline<'a> {
                         compact(detail)
                     ));
                 }
-                Event::RunFinished { outcome, speedup, root_cause } => {
+                Event::RunFinished { outcome, speedup, root_cause, stop_reason, .. } => {
                     s.push_str(&format!("\n## outcome: {outcome}\n"));
+                    if let Some(sr) = stop_reason {
+                        s.push_str(&format!("stop reason: {sr}\n"));
+                    }
                     if let Some(sp) = speedup {
                         s.push_str(&format!("speedup: {sp:.3}x\n"));
                     }
@@ -2686,5 +2761,12 @@ mod verify_timeout_tests {
         assert_eq!(adaptive_verify_timeout(Duration::from_secs(120)), 1230);
         // A very slow baseline cannot run unbounded.
         assert_eq!(adaptive_verify_timeout(Duration::from_secs(1000)), VERIFY_TIMEOUT_CEIL_S);
+    }
+
+    #[test]
+    fn failure_signature_uses_first_nonempty_line() {
+        assert_eq!(error_signature("line one\nline two"), "line one");
+        assert_eq!(error_signature("\n\n   spaced   \nmore"), "spaced");
+        assert_eq!(failure_signature("compile", "boom\ndetail"), "compile: boom");
     }
 }
