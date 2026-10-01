@@ -8,7 +8,7 @@
 use crate::attribution;
 use crate::backend::{self, Backend};
 use crate::config::Config;
-use crate::cuda_pipeline::{CudaPipeline, E2eConfig, EditMode, PipelineResult};
+use crate::cuda_pipeline::{CudaPipeline, E2eConfig, EditMode, PipelineResult, DEFAULT_VERIFY_TIMEOUT_S};
 use crate::journal::Journal;
 use crate::llm::LlmClient;
 use crate::memory::{ExperienceMemory, StrategyTracker};
@@ -406,6 +406,7 @@ fn run_one_target(
         watch: opts.watch,
         bench_shape: opts.bench_shape.clone(),
         final_rounds: opts.final_rounds,
+        verify_timeout_s: std::cell::Cell::new(DEFAULT_VERIFY_TIMEOUT_S),
     };
     pipe.run()
 }

@@ -41,6 +41,22 @@ const MAX_TOOL_ROUNDS: usize = 6;
 /// submission can exceed model output limits; consider a smaller `--kernel-file`).
 const EXECUTOR_WARN_CHARS: usize = 40_000;
 
+/// Correctness/verify timeout before the baseline calibrates it (seconds).
+pub const DEFAULT_VERIFY_TIMEOUT_S: u64 = 1800;
+/// A candidate's verify timeout = baseline verify time × this…
+const VERIFY_TIMEOUT_MULT: u64 = 10;
+/// …plus slack, clamped to [floor, ceil] seconds.
+const VERIFY_TIMEOUT_FLOOR_S: u64 = 60;
+const VERIFY_TIMEOUT_CEIL_S: u64 = 1800;
+
+/// A candidate's correctness test should take roughly as long as the baseline's;
+/// give generous slack, but never the flat default once the baseline is measured.
+/// Guards against a runaway/hung candidate kernel burning the full timeout.
+fn adaptive_verify_timeout(baseline: std::time::Duration) -> u64 {
+    (baseline.as_secs() * VERIFY_TIMEOUT_MULT + 30)
+        .clamp(VERIFY_TIMEOUT_FLOOR_S, VERIFY_TIMEOUT_CEIL_S)
+}
+
 pub struct CudaPipeline<'a> {
     pub cfg: &'a Config,
     pub llm: &'a dyn LlmClient,
@@ -71,6 +87,9 @@ pub struct CudaPipeline<'a> {
     pub last_bench_noise_pct: Option<f64>,
     /// Label of the shape used for the representative measurement.
     pub last_bench_label: Option<String>,
+    /// Correctness/verify timeout in seconds, calibrated from the baseline on
+    /// the first verify so a hung candidate can't burn the flat default.
+    pub verify_timeout_s: std::cell::Cell<u64>,
     /// Effective bandwidth (GB/s) of the most recent bench's representative shape.
     pub last_bench_gbs: Option<f64>,
     /// Device memory roofline (GB/s) reported by the most recent bench.
@@ -357,7 +376,15 @@ impl<'a> CudaPipeline<'a> {
             anyhow::bail!("baseline build failed: {}", first_error(&cfg));
         }
 
-        let verify = self.verify_now().context("verify (baseline)")?;
+        let verify = {
+            let t0 = Instant::now();
+            let v = self.verify_now().context("verify (baseline)")?;
+            if v["passed"] == json!(true) {
+                // Calibrate candidate verify timeouts against the baseline.
+                self.verify_timeout_s.set(adaptive_verify_timeout(t0.elapsed()));
+            }
+            v
+        };
         self.journal.record(&Event::StageCompleted {
             stage: "verify_baseline".into(),
             data: json!({"passed": verify["passed"], "failing": verify["failing_cases"]}),
@@ -1839,17 +1866,18 @@ impl<'a> CudaPipeline<'a> {
 
     fn verify_now(&self) -> Result<serde_json::Value> {
         let _guard = crate::gpu_lock::lock(&self.gpu_lock_path)?;
+        let timeout = self.verify_timeout_s.get();
         let resp = if let Some(tc) = &self.target.test_cmd {
             let argv = crate::custom::expand(tc, &self.worktree, &self.build_dir, None);
-            crate::exec::run_argv(&argv, 1800)?
+            crate::exec::run_argv(&argv, timeout)?
         } else {
             match self.target.backend {
                 Backend::Ninfer => {
-                    crate::exec::ctest(&self.build_dir, &self.target.test_filters, 1800)?
+                    crate::exec::ctest(&self.build_dir, &self.target.test_filters, timeout)?
                 }
                 Backend::Llamacpp => {
                     let bin = self.build_dir.join("bin").join("test-backend-ops");
-                    crate::exec::llama_test(&bin, "CUDA0", &self.target.test_filters, 1800)?
+                    crate::exec::llama_test(&bin, "CUDA0", &self.target.test_filters, timeout)?
                 }
                 Backend::Custom => {
                     anyhow::bail!("custom target has no `test_cmd` in kernelopt.toml")
@@ -2642,5 +2670,21 @@ int main() {
         // A 3-dim shape against a 2-int signature => unsupported.
         let ab = "int run_case(const char* label, std::int32_t rows, std::int32_t columns, std::uint32_t seed) { return 0; }\nint main(){ run_case(\"a\", 1, 2, 3u); }";
         assert!(append_shape_case(ab, "add_bias", &[1, 2, 3]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod verify_timeout_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn scales_with_baseline_and_clamps() {
+        // 2s baseline → 2*10+30 = 50 → floored to 60.
+        assert_eq!(adaptive_verify_timeout(Duration::from_secs(0)), VERIFY_TIMEOUT_FLOOR_S);
+        assert_eq!(adaptive_verify_timeout(Duration::from_secs(2)), 60);
+        assert_eq!(adaptive_verify_timeout(Duration::from_secs(120)), 1230);
+        // A very slow baseline cannot run unbounded.
+        assert_eq!(adaptive_verify_timeout(Duration::from_secs(1000)), VERIFY_TIMEOUT_CEIL_S);
     }
 }
