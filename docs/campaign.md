@@ -70,7 +70,7 @@ same way. See [monitoring.md](monitoring.md).
 ```
 
 `state.json` fields: `targets[]` (`status` ∈ pending/running/optimized/matched/
-fallback/failed), `cursor`, `llm_calls`, `tokens`, `elapsed_s`.
+unverified/fallback/failed), `cursor`, `llm_calls`, `tokens`, `elapsed_s`.
 
 **How `--resume <id>` avoids repeating work:**
 

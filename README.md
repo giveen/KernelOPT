@@ -53,7 +53,8 @@ repeats, then re-confirmed with interleaved fresh baseline/candidate re-benches
 by more than the measured noise, wins every round, is physically plausible
 (below a generous multiple of the memory roofline), and is correct on the
 measured shape; otherwise it is `matched` (correct but not faster) or `fallback`
-(rejected). The reported number is always explicit (`N×` = baseline/final, with
+(rejected). Correctness-only targets (no bench) report `unverified`: a candidate
+was applied, but no speedup could be measured. The reported number is always explicit (`N×` = baseline/final, with
 the shape, ms values, noise, and bandwidth-vs-roofline).
 
 **One GPU job at a time:** bench/verify/NCU/engine-E2E take an exclusive

@@ -65,7 +65,7 @@ pub struct CampaignOptions {
 pub struct TargetState {
     pub op: String,
     pub family: String,
-    /// pending | running | optimized | matched | fallback | failed
+    /// pending | running | optimized | matched | unverified | fallback | failed
     pub status: String,
     pub best_speedup: Option<f64>,
     pub iterations: u32,
@@ -95,6 +95,7 @@ impl CampaignState {
     pub fn summary(&self) -> serde_json::Value {
         let optimized = self.targets.iter().filter(|t| t.status == "optimized").count();
         let matched = self.targets.iter().filter(|t| t.status == "matched").count();
+        let unverified = self.targets.iter().filter(|t| t.status == "unverified").count();
         let failed = self.targets.iter().filter(|t| t.status == "failed").count();
         let best = self
             .targets
@@ -111,6 +112,7 @@ impl CampaignState {
             "processed": self.cursor,
             "optimized": optimized,
             "matched": matched,
+            "unverified": unverified,
             "failed": failed,
             "llm_calls": self.llm_calls,
             "tokens": self.tokens,

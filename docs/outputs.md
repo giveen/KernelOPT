@@ -53,7 +53,7 @@ kernelopt resume <run_id>    # last recorded state
 
 | Field | Meaning |
 |---|---|
-| `targets[]` | `op`, `family`, `status` (`pending`/`running`/`optimized`/`matched`/`fallback`/`failed`), `best_speedup`, `iterations`, `stop_reason`, `run_id`, `llm_calls`, `error` |
+| `targets[]` | `op`, `family`, `status` (`pending`/`running`/`optimized`/`matched`/`unverified`/`fallback`/`failed`), `best_speedup`, `iterations`, `stop_reason`, `run_id`, `llm_calls`, `error` |
 | `cursor` | next target index (resume point) |
 | `llm_calls`, `tokens`, `elapsed_s` | cumulative totals |
 

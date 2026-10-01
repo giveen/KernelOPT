@@ -1906,10 +1906,21 @@ impl<'a> CudaPipeline<'a> {
                 )),
             )
         } else if passed {
-            if !self.target.timing || verdict.optimized {
+            if verdict.optimized {
                 ("optimized", None)
-            } else {
+            } else if self.target.timing {
                 ("matched", None)
+            } else {
+                // Correctness passed but the target has no bench, so no speedup
+                // could be measured — do not claim a win.
+                (
+                    "unverified",
+                    Some(
+                        "no timing authority (correctness-only target): the candidate is applied but \
+                         no speedup could be measured"
+                            .into(),
+                    ),
+                )
             }
         } else if !shape_reg_ok {
             (

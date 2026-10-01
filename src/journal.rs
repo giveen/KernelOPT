@@ -72,7 +72,7 @@ pub enum Event {
         detail: Value,
     },
     RunFinished {
-        outcome: String, // optimized | matched | fallback
+        outcome: String, // optimized | matched | unverified | fallback
         speedup: Option<f64>,
         root_cause: Option<String>,
         /// Why the loop stopped (patience/target_reached/max_iterations/budget/

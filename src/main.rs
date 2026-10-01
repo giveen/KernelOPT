@@ -1593,6 +1593,9 @@ fn print_run_result(v: &serde_json::Value, show_paths: bool) {
     if let (Some(b), Some(f)) = (v["baseline_ms"].as_f64(), v["final_ms"].as_f64()) {
         println!("latency:    {b:.4} ms → {f:.4} ms");
     }
+    if speedup.is_none() {
+        println!("speedup:    not measured");
+    }
     if let Some(sr) = v["stop_reason"].as_str().filter(|s| !s.is_empty()) {
         println!("stopped:    {sr}");
     }
@@ -1941,6 +1944,7 @@ fn eval_campaign(campaign_id: &str) -> Result<()> {
     let count = |status: &str| state.targets.iter().filter(|t| t.status == status).count();
     let optimized = count("optimized");
     let matched = count("matched");
+    let unverified = count("unverified");
     let fallback = count("fallback");
     let failed = count("failed");
     speedups.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -1950,7 +1954,7 @@ fn eval_campaign(campaign_id: &str) -> Result<()> {
 
     println!("campaign {campaign_id}: {} targets", state.targets.len());
     println!(
-        "outcomes: optimized {optimized}  matched {matched}  fallback {fallback}  failed {failed}"
+        "outcomes: optimized {optimized}  matched {matched}  unverified {unverified}  fallback {fallback}  failed {failed}"
     );
     println!(
         "speedups: median {med:.3}x  max {max:.3}x  wins(>1.0x) {wins}/{}",
