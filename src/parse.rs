@@ -636,7 +636,7 @@ fn raw_output(resp: &Value) -> String {
     )
 }
 
-/// Tail of a tool's output (chars) for error messages — ctest/ninfer failures
+/// Tail of a tool's output (chars) for error messages — ctest failures
 /// report the cause near the end of the run.
 fn output_tail(text: &str, n: usize) -> String {
     let chars: Vec<char> = text.trim().chars().collect();
