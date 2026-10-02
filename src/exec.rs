@@ -82,6 +82,13 @@ fn kill_tree(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// True when an error is a tool timeout (all `exec` timeouts bail with
+/// "… timed out …"). Used to demote a hung re-verify to a gate failure
+/// instead of unwinding the whole run.
+pub fn is_timeout(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("timed out")
+}
+
 /// Gate 1: configure (optional) + build. Returns a `compile_view`-ready payload.
 #[allow(clippy::too_many_arguments)]
 pub fn build(
@@ -647,6 +654,14 @@ pub fn model_size_gb(path: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_timeout_matches_tool_timeouts() {
+        assert!(is_timeout(&anyhow::anyhow!("ctest timed out after 60s")));
+        assert!(is_timeout(&anyhow::anyhow!("bench timed out after 1800s")));
+        assert!(!is_timeout(&anyhow::anyhow!("ctest failed: exit 8")));
+        assert!(!is_timeout(&anyhow::anyhow!("spawning runner")));
+    }
 
     #[test]
     fn compute_cap_digits_normalizes() {
