@@ -12,8 +12,10 @@
 //!   2. The **local CUDA/CCCL headers** — authoritative for "does this symbol
 //!      exist and how is it declared", offline, and always available.
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 const EXCERPT_CHARS: usize = 1400;
 
@@ -29,6 +31,13 @@ pub fn explain(error: &str) -> Option<String> {
 
 /// Look a symbol up in the configured docs sources.
 pub fn lookup(symbol: &str) -> Option<String> {
+    // 1) stdio MCP server (auto: AMD's hip-docs-mcp when ROCm is present).
+    if let Some(cmd) = mcp_cmd() {
+        if let Some(text) = stdio_mcp_lookup(symbol, &cmd) {
+            return Some(text);
+        }
+    }
+    // 2) HTTP MCP docs server (NVIDIA cuda-docs, or any configured endpoint).
     let token = std::env::var("KERNELOPT_DOCS_TOKEN")
         .ok()
         .or_else(|| std::env::var("KERNELOPT_CUDA_DOCS_TOKEN").ok())
@@ -38,7 +47,107 @@ pub fn lookup(symbol: &str) -> Option<String> {
             return Some(text);
         }
     }
+    // 3) Local CUDA/CCCL (and ROCm, when present) headers.
     local_lookup(symbol)
+}
+
+/// stdio MCP command: explicit `KERNELOPT_DOCS_MCP_CMD`, else AMD's
+/// `hip-docs-mcp` when ROCm is detected and it is installed.
+fn mcp_cmd() -> Option<String> {
+    if let Ok(v) = std::env::var("KERNELOPT_DOCS_MCP_CMD") {
+        if !v.trim().is_empty() {
+            return Some(v);
+        }
+    }
+    if rocm_present() && command_on_path("hip-docs-mcp") {
+        return Some("hip-docs-mcp".to_string());
+    }
+    None
+}
+
+/// Drive a stdio MCP server: initialize → tools/list → tools/call. Best-effort;
+/// the process is killed (whole group) after a timeout so a hung server can't
+/// stall a run.
+fn stdio_mcp_lookup(symbol: &str, cmd: &str) -> Option<String> {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(cmd);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let pid = child.id() as i32;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(30));
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    });
+    let mut stdin = child.stdin.take()?;
+    let stdout = child.stdout.take()?;
+    let mut reader = BufReader::new(stdout);
+
+    let read_id = |reader: &mut BufReader<std::process::ChildStdout>, id: i64| -> Option<serde_json::Value> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).ok()? == 0 {
+                return None;
+            }
+            let t = line.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(t) {
+                if v.get("id").and_then(|i| i.as_i64()) == Some(id) {
+                    return Some(v);
+                }
+            }
+        }
+    };
+
+    let out = (|| {
+        send_json(&mut stdin, &serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "kernelopt", "version": "0"}}
+        }))?;
+        read_id(&mut reader, 1)?;
+        let _ = writeln!(stdin, "{}", serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        let _ = stdin.flush();
+        send_json(&mut stdin, &serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}))?;
+        let tools = read_id(&mut reader, 2)?;
+        let tool = tools["result"]["tools"]
+            .as_array()?
+            .iter()
+            .find(|t| {
+                let n = t["name"].as_str().unwrap_or("").to_ascii_lowercase();
+                n.contains("doc") || n.contains("search") || n.contains("hip") || n.contains("lookup")
+            })
+            .and_then(|t| t["name"].as_str())?
+            .to_string();
+        for key in ["query", "q", "text", "symbol", "prompt"] {
+            send_json(&mut stdin, &serde_json::json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": tool, "arguments": {key: symbol}}
+            }))?;
+            if let Some(text) = read_id(&mut reader, 3).and_then(|r| mcp_text(&r)) {
+                return Some(text.chars().take(EXCERPT_CHARS).collect());
+            }
+        }
+        None
+    })();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    out
 }
 
 /// The most likely offending identifier in a compiler diagnostic — only when it
@@ -225,13 +334,34 @@ fn include_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// ROCm/HIP local-header lookup is **off by default** (untested off a ROCm
-/// host); enable with `KERNELOPT_DOCS_ROCM=1`.
+/// ROCm/HIP docs are **auto-enabled when ROCm is detected** (hipcc, rocm-smi,
+/// or a ROCm install); force with `KERNELOPT_DOCS_ROCM=1`, or disable
+/// explicitly with `=0`/`off`.
 fn rocm_enabled() -> bool {
-    matches!(
-        std::env::var("KERNELOPT_DOCS_ROCM").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("on")
-    )
+    match std::env::var("KERNELOPT_DOCS_ROCM").ok().as_deref() {
+        Some("0") | Some("false") | Some("off") | Some("no") => false,
+        Some(_) => true,
+        None => rocm_present(),
+    }
+}
+
+/// Is a ROCm/HIP toolchain present on this host?
+fn rocm_present() -> bool {
+    for env in ["ROCM_PATH", "HIP_PATH"] {
+        if std::env::var(env).map(|v| !v.trim().is_empty()).unwrap_or(false) {
+            return true;
+        }
+    }
+    ["hipcc", "rocm-smi", "rocminfo", "amdgpu-arch"]
+        .iter()
+        .any(|t| command_on_path(t))
+        || Path::new("/opt/rocm").is_dir()
+}
+
+fn command_on_path(tool: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join(tool).exists()))
+        .unwrap_or(false)
 }
 
 fn cuda_include_dirs() -> Vec<PathBuf> {
@@ -353,6 +483,11 @@ fn mcp_lookup(symbol: &str, token: &str) -> Option<String> {
     None
 }
 
+fn send_json(stdin: &mut impl Write, v: &serde_json::Value) -> Option<()> {
+    writeln!(stdin, "{v}").ok()?;
+    stdin.flush().ok()
+}
+
 fn mcp_text(res: &serde_json::Value) -> Option<String> {
     let content = res["result"]["content"].as_array()?;
     let joined: String = content
@@ -424,5 +559,40 @@ mod tests {
         assert_eq!(camel_to_snake("WarpMergeSort"), "warp_merge_sort");
         assert_eq!(camel_to_snake("BlockScan"), "block_scan");
         assert_eq!(camel_to_snake("cub"), "cub");
+    }
+
+    const FAKE_MCP: &str = r#"
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        m = json.loads(line)
+    except Exception:
+        continue
+    method = m.get("method")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc":"2.0","id":m["id"],"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"fake","version":"0"}}}), flush=True)
+    elif method == "tools/list":
+        print(json.dumps({"jsonrpc":"2.0","id":m["id"],"result":{"tools":[{"name":"search_docs","description":"","inputSchema":{"type":"object"}}]}}), flush=True)
+    elif method == "tools/call":
+        q = m.get("params", {}).get("arguments", {}).get("query", "")
+        print(json.dumps({"jsonrpc":"2.0","id":m["id"],"result":{"content":[{"type":"text","text":"DOCS:" + q}]}}), flush=True)
+"#;
+
+    #[test]
+    fn stdio_mcp_client_reads_docs() {
+        if Command::new("python3").arg("--version").output().is_err() {
+            return; // no python3; skip
+        }
+        let dir = std::env::temp_dir().join(format!("kopt-mcp-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake.py");
+        std::fs::write(&script, FAKE_MCP).unwrap();
+        let cmd = format!("python3 {}", script.display());
+        let out = stdio_mcp_lookup("hipMalloc", &cmd);
+        assert!(out.as_deref().unwrap_or("").contains("hipMalloc"), "{out:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
