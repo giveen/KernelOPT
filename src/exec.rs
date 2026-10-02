@@ -192,6 +192,13 @@ fn bench_help_text(binary: &Path, timeout_secs: u64) -> String {
     }
 }
 
+/// Trimmed `--help` of a bench binary (flags + usage), for the Planner.
+pub fn bench_help(binary: &Path, timeout_secs: u64) -> Option<String> {
+    let text = bench_help_text(binary, timeout_secs);
+    let t = text.trim();
+    (!t.is_empty()).then(|| t.chars().take(2000).collect())
+}
+
 fn capabilities_from_help(text: &str) -> HashSet<String> {
     ["--csv-out", "--warmup", "--repeat", "--profile", "--t-sweep"]
         .into_iter()

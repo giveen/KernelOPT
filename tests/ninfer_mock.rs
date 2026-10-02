@@ -120,6 +120,7 @@ fn ninfer_identity_walk_add_bias() {
         recent_failures: Vec::new(),
         toolchain: None,
         recent_results: Vec::new(),
+        bench_options: None,
     };
 
     let result = pipe.run().unwrap();
