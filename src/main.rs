@@ -411,6 +411,24 @@ enum Cmd {
         #[arg(long)]
         login: bool,
     },
+    /// Structural code map: who calls a symbol (via codebase-memory-mcp).
+    Map {
+        /// Repo (or worktree) to index.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Symbol to trace callers for (else lists top-level symbols).
+        #[arg(long)]
+        symbol: Option<String>,
+    },
+    /// Check (and optionally install) external tools KernelOPT uses.
+    Setup {
+        /// Install what's missing and installable (codebase-memory-mcp binary).
+        #[arg(long)]
+        install: bool,
+        /// Don't ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
     /// List provider presets.
     Providers {
         /// Provider preset to probe (default: opencode-go).
@@ -1146,6 +1164,71 @@ fn main() -> Result<()> {
             Ok(())
         }
 
+        Cmd::Map { repo, symbol } => {
+            let repo = resolve_repo(repo, &["NINFER_REPO", "LLAMACPP_REPO"], "repo")?;
+            let Some(cm) = kernelopt::codemap::open(&repo) else {
+                anyhow::bail!(
+                    "codebase-memory-mcp not found — install it (`kernelopt setup`) or set KERNELOPT_CODEMAP_CMD"
+                );
+            };
+            println!("indexed {} as {}", repo.display(), cm.project);
+            match symbol {
+                Some(sym) => {
+                    let callers = cm.callers(&sym, 20);
+                    if callers.is_empty() {
+                        println!("no callers found for {sym}");
+                    } else {
+                        println!("callers of {sym}:");
+                        for c in callers {
+                            println!("  {c}");
+                        }
+                    }
+                }
+                None => {
+                    println!("(pass --symbol <fn> to trace its callers)");
+                }
+            }
+            Ok(())
+        }
+
+        Cmd::Setup { install, yes } => {
+            let status = kernelopt::setup::check_all();
+            println!("{}", kernelopt::setup::render_table(&status));
+            let missing: Vec<_> = status.iter().filter(|t| !t.found && t.installable).collect();
+            if !install {
+                if !missing.is_empty() {
+                    println!("run `kernelopt setup --install` to install what's installable");
+                }
+                return Ok(());
+            }
+            if missing.is_empty() {
+                println!("everything installable is present");
+                return Ok(());
+            }
+            if !yes {
+                print!("install {} tool(s)? [y/N] ", missing.len());
+                use std::io::Write as _;
+                let _ = std::io::stderr().flush();
+                let mut ans = String::new();
+                std::io::stdin().read_line(&mut ans)?;
+                if !matches!(ans.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    println!("not installed.");
+                    return Ok(());
+                }
+            }
+            for t in missing {
+                println!("installing {}…", t.name);
+                match t.name {
+                    "codebase-memory-mcp" => match kernelopt::setup::install_codemap(None) {
+                        Ok(p) => println!("  installed to {}", p.display()),
+                        Err(e) => eprintln!("  failed: {e:#}"),
+                    },
+                    other => eprintln!("  no installer for {other}"),
+                }
+            }
+            Ok(())
+        }
+
         Cmd::Providers { provider, model, base_url, api_key, no_ping } => {
             providers(provider, model, base_url, api_key, no_ping)
         }
@@ -1323,6 +1406,8 @@ fn run_single(
         recent_results: Vec::new(),
         bench_options: None,
         baseline_shapes: Vec::new(),
+        codemap: None,
+        caller_context: None,
     };
     pipe.run()
 }

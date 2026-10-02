@@ -414,6 +414,8 @@ fn run_one_target(
         recent_results: Vec::new(),
         bench_options: None,
         baseline_shapes: Vec::new(),
+        codemap: None,
+        caller_context: None,
     };
     pipe.run()
 }

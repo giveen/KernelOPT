@@ -125,6 +125,11 @@ pub struct CudaPipeline<'a> {
     /// Measured speedup of recent attempts (`<strategy>: <x>`), so the Planner
     /// sees what actually trends up, not just plan text.
     pub recent_results: Vec<String>,
+    /// Structural code map of the worktree (callers/impact), when the
+    /// codebase-memory-mcp binary is available. `None` = grep fallback.
+    pub codemap: Option<crate::codemap::CodeMap>,
+    /// Caller context for the target file, computed once per run.
+    pub caller_context: Option<String>,
     /// `--help` of the op's bench binary (available flags/regime), for the Planner.
     pub bench_options: Option<String>,
     /// Baseline per-shape medians (from the baseline bench), for the search-time
@@ -516,6 +521,14 @@ impl<'a> CudaPipeline<'a> {
         // Detect the host toolchain/arch for the Planner (never hardcoded).
         self.toolchain = crate::exec::detect_toolchain(&self.build_dir);
         self.bench_options = self.detect_bench_options();
+        // Index the worktree for structural queries (callers/impact). Slow or
+        // absent binary = no map; the grep-based context still applies.
+        if self.codemap.is_none() {
+            self.codemap = crate::codemap::open(&self.worktree);
+            if self.codemap.is_some() {
+                self.progress("· code map indexed (codebase-memory-mcp)".to_string());
+            }
+        }
 
         let verify = {
             let t0 = Instant::now();
@@ -869,6 +882,21 @@ impl<'a> CudaPipeline<'a> {
             ),
             None => String::new(),
         };
+        // Caller context, computed once per run: who calls the edited kernels.
+        // A signature change that breaks these callers can never compile, so
+        // the model must keep signatures stable (it cannot edit callers).
+        if self.caller_context.is_none() {
+            if let Some(cm) = &self.codemap {
+                self.caller_context = cm.caller_context(&self.target.target_file);
+            }
+        }
+        let caller_block = match &self.caller_context {
+            Some(c) => format!(
+                "CALLERS (who calls the kernels in this file — you may NOT edit these files, \
+                 so do NOT change any function signature they use):\n{c}\n\n"
+            ),
+            None => String::new(),
+        };
         let mut user = format!(
             "BACKEND: {backend}\nOP: {op}  (family: {family}{variant})\n\
              TARGET KERNEL FILE (editable — the ONLY file you may change): {file}\n\
@@ -876,7 +904,7 @@ impl<'a> CudaPipeline<'a> {
              READ-ONLY CONTEXT (launcher/dispatch/wrapper/plan): {context:?}\n\
              CONTRACT HEADER (read-only semantic authority — plan changes to the kernel only):\n{authority}\n\n\
              {contract_block}{label}:\n{context_block}\n\n\
-             PROFILING CONTEXT:\n{ctx}\n{bench_block}",
+             PROFILING CONTEXT:\n{ctx}\n{bench_block}{caller_block}",
             backend = self.target.backend.as_str(),
             op = self.target.op,
             family = self.target.family,
@@ -887,6 +915,7 @@ impl<'a> CudaPipeline<'a> {
             authority = self.authority_block(),
             contract_block = contract_block,
             bench_block = bench_block,
+            caller_block = caller_block,
             label = context_label,
             context_block = context,
             ctx = ctx_str,
@@ -1284,6 +1313,33 @@ impl<'a> CudaPipeline<'a> {
                 .join("candidates")
                 .join(format!("i{iteration}_c{chain_idx}_p{plan_no}_a{attempt}.cu"));
             let _ = std::fs::write(&sub_path, &candidate_source);
+            // A changed __global__/__device__ signature breaks callers outside
+            // the editable file, so it can never compile: fail fast with the
+            // caller list instead of paying for a rebuild.
+            if let Some(sig_err) = signature_change_error(kernel_source, &candidate_source) {
+                let mut err = sig_err;
+                if let Some(cm) = &self.codemap {
+                    if let Some(ctx) = cm.caller_context(&self.target.target_file) {
+                        err.push_str(&format!("\n  callers that would break:\n  {ctx}"));
+                    }
+                }
+                self.progress(format!("  c{chain_idx} ✗ signature: {}", flatten(&err)));
+                self.journal.record(&Event::AttemptFailed {
+                    iteration,
+                    chain: chain_idx,
+                    attempt,
+                    category: "signature".into(),
+                    error: err.clone(),
+                })?;
+                let _ = self.record_failure("signature", &err, &mut last_fail_sig);
+                self.tracker.record(
+                    &self.target.family.clone(),
+                    &crate::memory::strategy_tag(&plan.change),
+                    false,
+                );
+                last_error = Some(err);
+                continue;
+            }
             std::fs::write(self.target_path(), &candidate_source)
                 .context("writing candidate into worktree")?;
 
@@ -2991,6 +3047,61 @@ fn append_shape_case(source: &str, op: &str, shape: &[i64]) -> Option<String> {
     Some(out)
 }
 
+/// `__global__`/`__device__` function signatures in a CUDA source, as
+/// `name(param, …)` with whitespace normalized.
+fn kernel_signatures(source: &str) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut rest = source;
+    // Walk `__global__`/`__device__` markers; the declarator runs to the first
+    // `{` or `;` (definitions and prototypes alike).
+    while let Some(i) = rest.find("__global__").or_else(|| rest.find("__device__")) {
+        let after = &rest[i..];
+        let Some(end) = after.find(|c| c == '{' || c == ';') else {
+            break;
+        };
+        let decl: String = after[..end].split_whitespace().collect::<Vec<_>>().join(" ");
+        // Name = last identifier before `(`.
+        if let Some(paren) = decl.find('(') {
+            let head = decl[..paren].trim();
+            if let Some(name) = head.split_whitespace().last() {
+                let name = name.trim_start_matches('*').trim_start_matches('&').to_string();
+                if !name.is_empty() {
+                    out.insert(name, decl);
+                }
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+/// Error text when the candidate changes (or drops) a kernel signature the
+/// baseline had; `None` when signatures are unchanged. New kernels are fine —
+/// only changed/dropped ones break existing callers.
+fn signature_change_error(baseline: &str, candidate: &str) -> Option<String> {
+    let base = kernel_signatures(baseline);
+    if base.is_empty() {
+        return None;
+    }
+    let cand = kernel_signatures(candidate);
+    for (name, decl) in &base {
+        match cand.get(name) {
+            None => {
+                return Some(format!(
+                    "candidate drops kernel `{name}` (callers outside your editable file still use it) — keep the kernel and its signature"
+                ))
+            }
+            Some(d) if d != decl => {
+                return Some(format!(
+                    "candidate changes the signature of `{name}` (callers outside your editable file use the original) — keep the signature stable"
+                ))
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn first_error(compile: &serde_json::Value) -> String {
     compile["compiler_errors"]
         .as_array()
@@ -3283,6 +3394,20 @@ mod verify_timeout_tests {
         assert_eq!(error_signature("line one\nline two"), "line one");
         assert_eq!(error_signature("\n\n   spaced   \nmore"), "spaced");
         assert_eq!(failure_signature("compile", "boom\ndetail"), "compile: boom");
+    }
+
+    #[test]
+    fn signature_change_detected() {
+        let base = "__global__ void k(const float* x, float* y) { y[0] = x[0]; }";
+        let same = "__global__ void k(const float* x, float* y) {\n  y[0] = x[0];\n}";
+        assert!(signature_change_error(base, same).is_none());
+        let changed = "__global__ void k(const float* x, float* y, int n) { y[0] = x[0]; }";
+        let err = signature_change_error(base, changed).unwrap();
+        assert!(err.contains("k"), "{err}");
+        let dropped = "__global__ void other() {}";
+        assert!(signature_change_error(base, dropped).unwrap().contains("drops"));
+        // No kernels at all: nothing to compare.
+        assert!(signature_change_error("int plain() { return 1; }", changed).is_none());
     }
 
     #[test]
