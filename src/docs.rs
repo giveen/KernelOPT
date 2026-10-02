@@ -29,8 +29,9 @@ pub fn explain(error: &str) -> Option<String> {
 
 /// Look a symbol up in the configured docs sources.
 pub fn lookup(symbol: &str) -> Option<String> {
-    let token = std::env::var("KERNELOPT_CUDA_DOCS_TOKEN")
+    let token = std::env::var("KERNELOPT_DOCS_TOKEN")
         .ok()
+        .or_else(|| std::env::var("KERNELOPT_CUDA_DOCS_TOKEN").ok())
         .filter(|s| !s.trim().is_empty());
     if let Some(token) = token {
         if let Some(text) = mcp_lookup(symbol, &token) {
@@ -71,6 +72,15 @@ fn confident_symbol(s: &str) -> bool {
         "tcgen05",
         "cuda",
         "cooperative_groups",
+        // ROCm / HIP (used only when the ROCm docs source is enabled).
+        "hip",
+        "rocblas",
+        "hipblas",
+        "hipblaslt",
+        "rocwmma",
+        "wmma::",
+        "amdgcn",
+        "gfx",
     ];
     PREFIXES.iter().any(|p| s.starts_with(p))
 }
@@ -109,7 +119,7 @@ fn local_lookup(symbol: &str) -> Option<String> {
     if base.len() < 3 {
         return None;
     }
-    for dir in cuda_include_dirs() {
+    for dir in include_dirs() {
         let files = grep_files(&dir, base);
         if files.is_empty() {
             continue;
@@ -205,6 +215,25 @@ fn comment_start(lines: &[&str], idx: usize) -> usize {
     s
 }
 
+fn include_dirs() -> Vec<PathBuf> {
+    let mut dirs = cuda_include_dirs();
+    if rocm_enabled() {
+        dirs.extend(rocm_include_dirs());
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+/// ROCm/HIP local-header lookup is **off by default** (untested off a ROCm
+/// host); enable with `KERNELOPT_DOCS_ROCM=1`.
+fn rocm_enabled() -> bool {
+    matches!(
+        std::env::var("KERNELOPT_DOCS_ROCM").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
 fn cuda_include_dirs() -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     for env in ["CUDA_HOME", "CUDA_PATH"] {
@@ -237,14 +266,44 @@ fn cuda_include_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+fn rocm_include_dirs() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for env in ["ROCM_PATH", "HIP_PATH"] {
+        if let Ok(v) = std::env::var(env) {
+            if !v.trim().is_empty() {
+                roots.push(PathBuf::from(v));
+            }
+        }
+    }
+    roots.push(PathBuf::from("/opt/rocm"));
+    if let Ok(rd) = std::fs::read_dir("/opt") {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with("rocm") {
+                roots.push(e.path());
+            }
+        }
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for r in roots {
+        dirs.push(r.join("include"));
+        dirs.push(r.join("include").join("hip"));
+    }
+    dirs.retain(|d| d.is_dir());
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
 // --------------------------------------------------------------------------- //
 // optional MCP docs server (best-effort, opt-in)
 // --------------------------------------------------------------------------- //
 
 fn mcp_lookup(symbol: &str, token: &str) -> Option<String> {
-    let url = std::env::var("KERNELOPT_CUDA_DOCS_URL").unwrap_or_else(|_| {
-        "https://api.copilot.nsight.ngc.nvidia.com/mcp/cuda-docs".to_string()
-    });
+    let url = std::env::var("KERNELOPT_DOCS_URL")
+        .or_else(|_| std::env::var("KERNELOPT_CUDA_DOCS_URL"))
+        .unwrap_or_else(|_| {
+            "https://api.copilot.nsight.ngc.nvidia.com/mcp/cuda-docs".to_string()
+        });
     let http = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -329,6 +388,22 @@ mod tests {
             None
         );
         assert_eq!(symbol_from_error("error: identifier \"kFooBar\" is undefined"), None);
+    }
+
+    #[test]
+    fn extracts_hip_symbols() {
+        assert_eq!(
+            symbol_from_error("error: no matching function for call to \"hipMalloc\" ..."),
+            Some("hipMalloc".into())
+        );
+        assert_eq!(
+            symbol_from_error("error: \"rocwmma::load_matrix_sync\" was not declared"),
+            Some("rocwmma::load_matrix_sync".into())
+        );
+        assert_eq!(
+            symbol_from_error("error: use of undeclared identifier \"__builtin_amdgcn_sched_group_barrier\""),
+            Some("__builtin_amdgcn_sched_group_barrier".into())
+        );
     }
 
     #[test]
