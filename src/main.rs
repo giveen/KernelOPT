@@ -420,6 +420,15 @@ enum Cmd {
         #[arg(long)]
         symbol: Option<String>,
     },
+    /// Check (and optionally install) external tools KernelOPT uses.
+    Setup {
+        /// Install what's missing and installable (codebase-memory-mcp binary).
+        #[arg(long)]
+        install: bool,
+        /// Don't ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
     /// List provider presets.
     Providers {
         /// Provider preset to probe (default: opencode-go).
@@ -1177,6 +1186,44 @@ fn main() -> Result<()> {
                 }
                 None => {
                     println!("(pass --symbol <fn> to trace its callers)");
+                }
+            }
+            Ok(())
+        }
+
+        Cmd::Setup { install, yes } => {
+            let status = kernelopt::setup::check_all();
+            println!("{}", kernelopt::setup::render_table(&status));
+            let missing: Vec<_> = status.iter().filter(|t| !t.found && t.installable).collect();
+            if !install {
+                if !missing.is_empty() {
+                    println!("run `kernelopt setup --install` to install what's installable");
+                }
+                return Ok(());
+            }
+            if missing.is_empty() {
+                println!("everything installable is present");
+                return Ok(());
+            }
+            if !yes {
+                print!("install {} tool(s)? [y/N] ", missing.len());
+                use std::io::Write as _;
+                let _ = std::io::stderr().flush();
+                let mut ans = String::new();
+                std::io::stdin().read_line(&mut ans)?;
+                if !matches!(ans.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    println!("not installed.");
+                    return Ok(());
+                }
+            }
+            for t in missing {
+                println!("installing {}…", t.name);
+                match t.name {
+                    "codebase-memory-mcp" => match kernelopt::setup::install_codemap(None) {
+                        Ok(p) => println!("  installed to {}", p.display()),
+                        Err(e) => eprintln!("  failed: {e:#}"),
+                    },
+                    other => eprintln!("  no installer for {other}"),
                 }
             }
             Ok(())
