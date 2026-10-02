@@ -43,7 +43,7 @@ fn ninfer_identity_walk_add_bias() {
                 name: "submit_plan".into(),
                 arguments: serde_json::json!({"plan": {"change": "identity walk"}}),
             }],
-            usage: Some(kernelopt::llm::Usage { prompt_tokens: 5, completion_tokens: 5 }),
+            usage: Some(kernelopt::llm::Usage { prompt_tokens: 5, completion_tokens: 5, cached_tokens: 0 }),
         },
         Completion {
             content: None,
@@ -51,7 +51,7 @@ fn ninfer_identity_walk_add_bias() {
                 name: "submit_kernel".into(),
                 arguments: serde_json::json!({"kernel_source": candidate, "change_summary": "comment"}),
             }],
-            usage: Some(kernelopt::llm::Usage { prompt_tokens: 5, completion_tokens: 5 }),
+            usage: Some(kernelopt::llm::Usage { prompt_tokens: 5, completion_tokens: 5, cached_tokens: 0 }),
         },
         Completion {
             content: Some("{\"item_id\":\"m1\",\"iteration\":0,\"speedup\":1.0,\"rewrite_type\":\"none\",\"framework\":\"cuda\",\"direction\":\"walk\",\"profiling_signal\":\"\",\"strategy_title\":\"walk\",\"strategy_description\":\"identity\"}".into()),

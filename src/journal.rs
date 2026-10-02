@@ -52,6 +52,10 @@ pub enum Event {
         agent: String,
         prompt_tokens: u64,
         completion_tokens: u64,
+        /// Prompt tokens served from the provider's prefix cache (0 when the
+        /// endpoint doesn't report it). Defaulted for journals without it.
+        #[serde(default)]
+        cached_tokens: u64,
     },
     /// A single Executor attempt that failed a gate (before a retry).
     AttemptFailed {
@@ -193,8 +197,13 @@ pub fn format_event(e: &Event) -> String {
             }
             s
         }
-        Event::LlmCall { agent, prompt_tokens, completion_tokens } => {
-            format!("  {}: {prompt_tokens}+{completion_tokens} tok", agent_label(agent))
+        Event::LlmCall { agent, prompt_tokens, completion_tokens, cached_tokens } => {
+            let cached = if *cached_tokens > 0 {
+                format!(" ({cached_tokens} cached)")
+            } else {
+                String::new()
+            };
+            format!("  {}: {prompt_tokens}+{completion_tokens} tok{cached}", agent_label(agent))
         }
         Event::MemoryUpdated { action, direction } => {
             format!("  memory {action}: {}", direction.clone().unwrap_or_default())

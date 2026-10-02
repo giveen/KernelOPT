@@ -47,6 +47,7 @@ impl<'a> Pipeline<'a> {
                 agent: agent.into(),
                 prompt_tokens: u.prompt_tokens,
                 completion_tokens: u.completion_tokens,
+                cached_tokens: u.cached_tokens,
             });
         }
     }
