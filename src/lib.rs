@@ -8,6 +8,7 @@ pub mod config;
 pub mod cuda_pipeline;
 pub mod custom;
 pub mod docs;
+pub mod docs_oauth;
 pub mod dotenv;
 pub mod engine_share;
 pub mod exec;

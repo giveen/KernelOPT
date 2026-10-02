@@ -403,10 +403,13 @@ enum Cmd {
         /// Run id.
         run_id: String,
     },
-    /// Look up a CUDA/CUB symbol in the docs sources (local headers / MCP).
+    /// Look up a CUDA/CUB (or HIP) symbol in the docs sources.
     Docs {
-        /// Symbol to look up, e.g. `cub::WarpMergeSort` or `__reduce_max_sync`.
-        symbol: String,
+        /// Symbol to look up, e.g. `cub::WarpMergeSort` (omit with --login).
+        symbol: Option<String>,
+        /// Run the OAuth login for the docs MCP server and cache the token.
+        #[arg(long)]
+        login: bool,
     },
     /// List provider presets.
     Providers {
@@ -1126,10 +1129,19 @@ fn main() -> Result<()> {
             Ok(())
         }
 
-        Cmd::Docs { symbol } => {
-            match kernelopt::docs::lookup(&symbol) {
-                Some(text) => println!("{text}"),
-                None => eprintln!("no docs found for {symbol}"),
+        Cmd::Docs { symbol, login } => {
+            if login {
+                let t = kernelopt::docs_oauth::login()?;
+                let left = (t.expires_at - chrono::Utc::now().timestamp()).max(0);
+                println!("logged in — docs token cached (valid ~{left}s)");
+                return Ok(());
+            }
+            let Some(sym) = symbol else {
+                anyhow::bail!("provide a symbol to look up, or use --login");
+            };
+            match kernelopt::docs::lookup(&sym) {
+                Some(text) => println!("{}", kernelopt::docs::clean_markdown(&text)),
+                None => eprintln!("no docs found for {sym}"),
             }
             Ok(())
         }
