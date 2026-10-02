@@ -40,22 +40,39 @@ pub fn lookup(symbol: &str) -> Option<String> {
     local_lookup(symbol)
 }
 
-/// The most likely offending identifier in a compiler diagnostic.
+/// The most likely offending identifier in a compiler diagnostic — only when it
+/// is plausibly a CUDA/CUB API symbol. Generic tokens (`lambda`, `unsigned`,
+/// user types) yield `None` so we never inject a noise lookup.
 pub fn symbol_from_error(msg: &str) -> Option<String> {
-    let mut preferred: Option<String> = None;
-    let mut fallback: Option<String> = None;
     for quoted in quoted_strings(msg) {
         let ident = base_ident(&quoted);
-        if ident.len() < 3 {
-            continue;
-        }
-        if ident.contains("::") || ident.starts_with("__") || ident.starts_with("cub") {
-            preferred.get_or_insert(ident);
-        } else {
-            fallback.get_or_insert(ident);
+        if confident_symbol(&ident) {
+            return Some(ident);
         }
     }
-    preferred.or(fallback)
+    None
+}
+
+/// A namespaced name, a `__` intrinsic, or a known CUDA builtin prefix.
+fn confident_symbol(s: &str) -> bool {
+    if s.len() < 4 {
+        return false;
+    }
+    if s.contains("::") {
+        return true;
+    }
+    const PREFIXES: &[&str] = &[
+        "__",
+        "atomic",
+        "make_",
+        "tex",
+        "surface",
+        "wgmma",
+        "tcgen05",
+        "cuda",
+        "cooperative_groups",
+    ];
+    PREFIXES.iter().any(|p| s.starts_with(p))
 }
 
 /// Identifiers inside double quotes, e.g. `"__reduce_max_sync"` or
@@ -301,7 +318,17 @@ mod tests {
             symbol_from_error("error: the default constructor of \"cub::_V_3::WarpMergeSort<unsigned long long, 2, 32>\" cannot be referenced"),
             Some("cub::_V_3::WarpMergeSort".into())
         );
+        assert_eq!(
+            symbol_from_error("error: no instance of overloaded function \"atomicAdd\" matches"),
+            Some("atomicAdd".into())
+        );
+        // Non-symbols must not trigger a lookup.
         assert_eq!(symbol_from_error("error: expression must be a modifiable lvalue"), None);
+        assert_eq!(
+            symbol_from_error("error: function \"lambda [](int, unsigned int)\" cannot be referenced"),
+            None
+        );
+        assert_eq!(symbol_from_error("error: identifier \"kFooBar\" is undefined"), None);
     }
 
     #[test]
