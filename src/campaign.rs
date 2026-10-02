@@ -412,6 +412,7 @@ fn run_one_target(
         recent_failures: Vec::new(),
         toolchain: None,
         recent_results: Vec::new(),
+        bench_options: None,
     };
     pipe.run()
 }

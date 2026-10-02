@@ -125,6 +125,8 @@ pub struct CudaPipeline<'a> {
     /// Measured speedup of recent attempts (`<strategy>: <x>`), so the Planner
     /// sees what actually trends up, not just plan text.
     pub recent_results: Vec<String>,
+    /// `--help` of the op's bench binary (available flags/regime), for the Planner.
+    pub bench_options: Option<String>,
     /// Effective bandwidth (GB/s) of the most recent bench's representative shape.
     pub last_bench_gbs: Option<f64>,
     /// Device memory roofline (GB/s) reported by the most recent bench.
@@ -376,6 +378,16 @@ impl<'a> CudaPipeline<'a> {
         truncate_chars(&out, 3500)
     }
 
+    /// `--help` of the op's bench binary (available flags), for the Planner.
+    fn detect_bench_options(&self) -> Option<String> {
+        let bin = match self.target.backend {
+            Backend::Ninfer => self.bench_binary_path().ok()?,
+            Backend::Llamacpp => self.build_dir.join("bin").join("test-backend-ops"),
+            Backend::Custom => return None,
+        };
+        crate::exec::bench_help(&bin, 60)
+    }
+
     fn render_prompt(&self, template: &str, vars: &serde_json::Value) -> Result<String> {        let path = self.cfg.prompts_dir.join(template);
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading prompt template {}", path.display()))?;
@@ -499,6 +511,7 @@ impl<'a> CudaPipeline<'a> {
         }
         // Detect the host toolchain/arch for the Planner (never hardcoded).
         self.toolchain = crate::exec::detect_toolchain(&self.build_dir);
+        self.bench_options = self.detect_bench_options();
 
         let verify = {
             let t0 = Instant::now();
@@ -850,6 +863,12 @@ impl<'a> CudaPipeline<'a> {
                 "CORRECTNESS CONTRACT (from the op's tests — your change must preserve these invariants):\n{tc}\n\n"
             )
         };
+        let bench_block = match &self.bench_options {
+            Some(b) => format!(
+                "BENCH OPTIONS (the op benchmark's flags — KernelOPT runs the pinned measurement with these; target that regime, do not change them):\n{b}\n\n"
+            ),
+            None => String::new(),
+        };
         let mut user = format!(
             "BACKEND: {backend}\nOP: {op}  (family: {family}{variant})\n\
              TARGET KERNEL FILE (editable — the ONLY file you may change): {file}\n\
@@ -857,7 +876,7 @@ impl<'a> CudaPipeline<'a> {
              READ-ONLY CONTEXT (launcher/dispatch/wrapper/plan): {context:?}\n\
              CONTRACT HEADER (read-only semantic authority — plan changes to the kernel only):\n{authority}\n\n\
              {contract_block}{label}:\n{context_block}\n\n\
-             PROFILING CONTEXT:\n{ctx}\n",
+             PROFILING CONTEXT:\n{ctx}\n{bench_block}",
             backend = self.target.backend.as_str(),
             op = self.target.op,
             family = self.target.family,
@@ -867,6 +886,7 @@ impl<'a> CudaPipeline<'a> {
             context = self.target.context_files,
             authority = self.authority_block(),
             contract_block = contract_block,
+            bench_block = bench_block,
             label = context_label,
             context_block = context,
             ctx = ctx_str,
@@ -1081,15 +1101,22 @@ impl<'a> CudaPipeline<'a> {
                 "CORRECTNESS CONTRACT (from the op's tests — your change must preserve these invariants):\n{tc}\n\n"
             )
         };
+        let bench_block = match &self.bench_options {
+            Some(b) => format!(
+                "BENCH OPTIONS (the op benchmark's flags — KernelOPT measures the pinned workload with these; target that regime):\n{b}\n\n"
+            ),
+            None => String::new(),
+        };
         let base_user = format!(
             "BACKEND: {backend}\nTARGET FILE: {file}\n\n\
              CONTRACT HEADER (read-only semantic authority — do not change its semantics):\n{authority}\n\n\
-             {contract_block}CURRENT CONTENT:\n```cuda\n{src}\n```\n\n\
+             {contract_block}{bench_block}CURRENT CONTENT:\n```cuda\n{src}\n```\n\n\
              OPTIMIZATION PLAN:\n{plan}",
             backend = self.target.backend.as_str(),
             file = self.target.target_file,
             authority = self.authority_block(),
             contract_block = contract_block,
+            bench_block = bench_block,
             src = kernel_source,
             plan = plan.change,
         );
