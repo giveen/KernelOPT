@@ -999,6 +999,17 @@ impl<'a> CudaPipeline<'a> {
                     "required": ["path"]
                 }),
             },
+            ToolDef {
+                name: "callers".into(),
+                description: "Who calls a function (structural call graph). Use before changing any signature.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string", "description": "function name, e.g. add_bias_bf16x8_kernel"}
+                    },
+                    "required": ["symbol"]
+                }),
+            },
         ];
 
         // Bound tool-exploration context: each result is truncated and the
@@ -1060,6 +1071,22 @@ impl<'a> CudaPipeline<'a> {
                             .unwrap_or_else(|e| format!("read failed: {e}"));
                         self.progress(format!("  planner read_file({path}:{start}-{end})"));
                         results.push_str(&format!("\n\nTOOL read_file({path}, {start}-{end}):\n{res}"));
+                    }
+                    "callers" => {
+                        let sym = tc.arguments.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+                        let res = match &self.codemap {
+                            Some(cm) => {
+                                let found = cm.callers(sym, 10);
+                                if found.is_empty() {
+                                    format!("no callers found for {sym}")
+                                } else {
+                                    found.join("\n")
+                                }
+                            }
+                            None => "code map unavailable (codebase-memory-mcp not installed) — use search_repo instead".to_string(),
+                        };
+                        self.progress(format!("  planner callers({sym:?})"));
+                        results.push_str(&format!("\n\nTOOL callers(symbol={sym:?}):\n{res}"));
                     }
                     _ => {}
                 }

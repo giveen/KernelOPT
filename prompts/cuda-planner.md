@@ -39,6 +39,8 @@ TOOLS (use them before planning when the file is large):
   (e.g. how a helper is defined elsewhere, where a launch config is chosen).
 - read_file(path, start?, end?) — read a 1-based, inclusive line range of any
   repo file. Prefer reading the specific function/loop you will change.
+- callers(symbol) — who calls a function (structural call graph). Use it before
+  touching any signature: callers live outside your editable file.
 - submit_plan(plan) — submit your ONE plan.
 
 When the target file is small it is inlined under `KERNEL SOURCE`. When it is
