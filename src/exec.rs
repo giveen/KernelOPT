@@ -115,8 +115,10 @@ pub fn build(
                 }
             }
         }
+        // Backend-specific flags (e.g. -DNINFER_BUILD_BENCHMARKS=ON) come from
+        // the caller via configure_args; the default stays generic.
         let args: Vec<String> = if configure_args.is_empty() {
-            ["-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=ON", "-DNINFER_BUILD_BENCHMARKS=ON"]
+            ["-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=ON"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect()
@@ -161,7 +163,7 @@ pub fn build(
     }))
 }
 
-/// Gate 2 (ninfer): ctest.
+/// Gate 2: ctest.
 pub fn ctest(build_dir: &Path, tests: &[String], timeout_secs: u64) -> Result<Value> {
     let mut cmd = Command::new("ctest");
     cmd.arg("--test-dir")

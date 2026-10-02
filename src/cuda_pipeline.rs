@@ -2472,7 +2472,7 @@ impl<'a> CudaPipeline<'a> {
     /// test and leaves the worktree at the winner.
     fn shape_consistency_gate(&mut self, best: &Candidate) -> Result<ShapeGate> {
         if self.target.backend != Backend::Ninfer || !self.target.timing {
-            return Ok(ShapeGate::Skipped("not a ninfer timing target".into()));
+            return Ok(ShapeGate::Skipped("shape gate requires a timing target with extendable run_case tests".into()));
         }
         let Some(shape) = parse_bench_shape(self.last_bench_label.as_deref()) else {
             return Ok(ShapeGate::Skipped("no parseable bench shape".into()));
@@ -3107,7 +3107,8 @@ fn append_shape_cases(source: &str, op: &str, shapes: &[Vec<i64>]) -> Option<Str
     (added > 0).then_some(cur)
 }
 
-/// Append an extra `run_case(...)` for the measured shape to a ninfer op test.
+/// Append an extra `run_case(...)` for the measured shape to an op test with
+/// `run_case` cases.
 ///
 /// Reuses the *last* existing call so argument positions are preserved (the
 /// op tests have varied signatures), and only when the signature is the common
