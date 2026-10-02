@@ -207,24 +207,41 @@ pub fn parse_ncu_csv(csv_text: &str) -> Value {
 /// Per-test status from ctest output → `{cases, failing_cases}`.
 pub fn parse_ctest(text: &str) -> Value {
     let re = Regex::new(
-        r"Test\s+#\d+:\s*(?P<name>\S+)\s*\.*\s*(?P<status>Passed|Failed|\*\*\*Failed|\*\*\*Timeout|Skipped|Not Run)",
+        r"Test\s+#\d+:\s*(?P<name>\S+)\s*\.*\s*(?P<status>Passed|Failed|\*\*\*Failed|\*\*\*Timeout|\*\*\*Exception\S*|Skipped|Not Run)",
     )
     .expect("ctest regex");
     let mut cases: Vec<Value> = Vec::new();
     for c in re.captures_iter(text) {
         let status = &c["status"];
-        let s = if status.contains("Failed") || status.contains("Timeout") {
+        let s = if status.contains("Failed")
+            || status.contains("Timeout")
+            || status.contains("Exception")
+        {
             "failed".to_string()
         } else {
             status.to_lowercase()
         };
         cases.push(json!({"name": &c["name"], "status": s}));
     }
-    let failing: Vec<Value> = cases
+    let mut failing: Vec<Value> = cases
         .iter()
         .filter(|c| c["status"] == "failed")
         .cloned()
         .collect();
+    // Fallback: ctest's "The following tests FAILED:" summary list, which names
+    // the failures even when the per-test line format differs (e.g. a crashing
+    // test prints "***Exception: SegFault" instead of "***Failed").
+    if failing.is_empty() {
+        let list = Regex::new(r"(?m)^\s*\d+\s*-\s*(?P<name>\S+)\s+\((?P<kind>[^)]*)\)")
+            .expect("ctest list regex");
+        for c in list.captures_iter(text) {
+            let name = c["name"].to_string();
+            if !cases.iter().any(|x| x["name"] == json!(name)) {
+                cases.push(json!({"name": name, "status": "failed"}));
+            }
+            failing.push(json!({"name": &c["name"], "status": "failed"}));
+        }
+    }
     json!({"cases": cases, "failing_cases": failing})
 }
 
@@ -619,6 +636,13 @@ fn raw_output(resp: &Value) -> String {
     )
 }
 
+/// Tail of a tool's output (chars) for error messages — ctest/ninfer failures
+/// report the cause near the end of the run.
+fn output_tail(text: &str, n: usize) -> String {
+    let chars: Vec<char> = text.trim().chars().collect();
+    chars[chars.len().saturating_sub(n)..].iter().collect()
+}
+
 /// Gate 1 view: `{passed, exit_code, compiler_errors, raw_tail}` from a
 /// `cuda_compile` response (which now carries the raw build output).
 pub fn compile_view(resp: &Value) -> Value {
@@ -683,6 +707,7 @@ pub fn verify_view(resp: &Value, backend: crate::backend::Backend) -> Value {
                 "exit_code": exit,
                 "cases": parsed["cases"],
                 "failing_cases": failing,
+                "suite_output": output_tail(&text, 3000),
             })
         }
         crate::backend::Backend::Llamacpp => {
@@ -697,6 +722,7 @@ pub fn verify_view(resp: &Value, backend: crate::backend::Backend) -> Value {
                 "tests_passed": parsed["tests_passed"],
                 "tests_total": parsed["tests_total"],
                 "failing_cases": failing,
+                "suite_output": output_tail(&text, 3000),
             })
         }
         crate::backend::Backend::Custom => {
@@ -715,6 +741,7 @@ pub fn verify_view(resp: &Value, backend: crate::backend::Backend) -> Value {
                 "passed": ran_clean && failing.is_empty(),
                 "exit_code": exit,
                 "failing_cases": failing,
+                "suite_output": output_tail(&text, 3000),
             })
         }
     }
@@ -861,5 +888,29 @@ Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (n
         assert_eq!(v.len(), 1, "{v:?}");
         assert_eq!(v[0].0, "void k<float>");
         assert!((v[0].1 - 22000.0).abs() < 1.0, "{v:?}"); // 22 us -> ns
+    }
+
+    #[test]
+    fn ctest_failures_include_exceptions_and_summary() {
+        // A crashing test prints ***Exception, not ***Failed, in the per-test line.
+        let out = "Test #1: ninfer_x_test ............***Exception: SegFault  0.10 sec\n\
+                   The following tests FAILED:\n\t  1 - ninfer_x_test (***Exception: SegFault)\n\
+                   Errors while running CTest\n";
+        let v = parse_ctest(out);
+        let names: Vec<String> = v["failing_cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"ninfer_x_test".to_string()), "{v:?}");
+    }
+
+    #[test]
+    fn ctest_failed_lines_parse() {
+        let out = "Test #1: a ..........Passed  0.01 sec\nTest #2: b ..........***Failed  0.02 sec\n";
+        let v = parse_ctest(out);
+        assert_eq!(v["failing_cases"].as_array().unwrap().len(), 1);
+        assert_eq!(v["failing_cases"][0]["name"], "b");
     }
 }
