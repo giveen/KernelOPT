@@ -972,6 +972,13 @@ impl<'a> CudaPipeline<'a> {
             },
         ];
 
+        // Bound tool-exploration context: each result is truncated and the
+        // total appended per plan is capped, so one plan can't grow 4k → 15k.
+        const TOOL_RESULT_CHARS: usize = 1500;
+        const TOOL_BUDGET_CHARS: usize = 6000;
+        let mut tool_chars: usize = 0;
+        let mut idle_rounds: u32 = 0;
+
         for _round in 0..MAX_TOOL_ROUNDS {
             let completion = self
                 .llm
@@ -1036,6 +1043,13 @@ impl<'a> CudaPipeline<'a> {
                         "\n\nYour previous answer was not a concrete plan. Propose ONE specific, \
                          DIFFERENT code change with a mechanism, in English, and call submit_plan.",
                     );
+                    idle_rounds += 1;
+                    // Two idle rounds in a row = the model is chatting, not
+                    // converging: stop paying for more rounds of this attempt.
+                    if idle_rounds >= 2 {
+                        self.progress("  planner idle twice — aborting this plan attempt".to_string());
+                        break;
+                    }
                     continue;
                 }
                 return Ok(PlannedChange {
@@ -1043,7 +1057,17 @@ impl<'a> CudaPipeline<'a> {
                     ..Default::default()
                 });
             }
-            user.push_str(&results);
+            idle_rounds = 0;
+            // Truncate this round's results and stop accumulating once the per-plan
+            // tool budget is spent; the model must then decide from what it has.
+            let mut chunk: String = results.chars().take(TOOL_RESULT_CHARS * 2).collect();
+            if tool_chars + chunk.len() > TOOL_BUDGET_CHARS {
+                let keep = TOOL_BUDGET_CHARS.saturating_sub(tool_chars);
+                chunk = chunk.chars().take(keep).collect();
+                chunk.push_str("\n\n[tool context budget exhausted — decide from the above: call submit_plan now or explicitly decline]");
+            }
+            tool_chars += chunk.len();
+            user.push_str(&chunk);
         }
         // Exhausted rounds without a usable plan: empty change => caller skips.
         Ok(PlannedChange::default())
