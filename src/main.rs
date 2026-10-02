@@ -1587,7 +1587,8 @@ fn wizard(
 ) -> Result<()> {
     // 0. Prereqs first: fail fast on missing required tools instead of
     // burning a run 30 minutes in. Recommended-but-missing only warns.
-    {
+    // (Skipped for --dry-run, which only prints the command it would run.)
+    if !dry_run {
         let status = kernelopt::setup::check_all();
         let missing_req: Vec<_> = status
             .iter()
@@ -1654,6 +1655,31 @@ fn wizard(
     // 3. Optimizer LLM (accept the resolved .env defaults by default).
     let resolved = llm.resolve();
     let (provider, model) = if yes {
+        // Non-interactive: still probe — but only hard-fail when we KNOW the
+        // model can't drive the pipeline (tool calls confirmed absent).
+        // Anything else (network error, unlisted custom model, mock provider)
+        // warns and continues so scripts/CI don't break on probe infra.
+        match probe_llm(
+            &resolved.provider,
+            &resolved.model,
+            resolved.base_url.as_deref(),
+            resolved.api_key.as_deref(),
+        ) {
+            Ok(p) if matches!(p.tool_ok, Some(false)) => {
+                anyhow::bail!(
+                    "provider {}/{}: tool-call probe failed — the pipeline needs tool calls; pick a model with function-calling support",
+                    resolved.provider, resolved.model
+                )
+            }
+            Ok(p) if !p.model_listed => {
+                eprintln!(
+                    "warning: {:?} not in the provider model list; continuing (--yes)",
+                    resolved.model
+                );
+            }
+            Err(e) => eprintln!("warning: LLM probe failed ({e:#}); continuing (--yes)"),
+            Ok(_) => {}
+        }
         (resolved.provider, resolved.model)
     } else {
         prompt_llm(resolved)?
@@ -1872,7 +1898,9 @@ fn choose_preset() -> Result<String> {
 /// Ask for the optimizer LLM, probing it first (auth + tool call) so a broken
 /// model is caught before a run starts.
 fn prompt_llm(mut resolved: ResolvedLlm) -> Result<(String, String)> {
-    loop {
+    // Cap rounds: on EOF stdin (or persistent indecision) ask_line returns the
+    // default forever — bail out with guidance instead of looping forever.
+    for _ in 0..3 {
         println!(
             "\nOptimizer LLM: {}/{}",
             resolved.provider, resolved.model
@@ -1923,6 +1951,7 @@ fn prompt_llm(mut resolved: ResolvedLlm) -> Result<(String, String)> {
             resolved.model = model;
         }
     }
+    anyhow::bail!("no working LLM confirmed; pass --provider/--model flags or set KERNELOPT_PROVIDER/KERNELOPT_MODEL")
 }
 
 /// List local model artifacts usable for the engine-E2E (Gate 3) check.

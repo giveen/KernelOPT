@@ -279,6 +279,27 @@ pub fn check_all() -> Vec<ToolStatus> {
     if let Some(s) = ncu_profiling_status() {
         out.push(s);
     }
+    // Disk: target builds run to GBs; warn when the workspace is nearly full.
+    // (Recommended, not required — small targets fit anywhere.)
+    match std::env::current_dir().ok().and_then(|c| disk_free_gb(&c)) {
+        Some(free) if free < 10.0 => out.push(ToolStatus {
+            name: "disk space",
+            need: Need::Recommended,
+            found: false,
+            detail: format!("{free:.1} GB free"),
+            hint: "free ≥10 GB where .kernelopt/ lives (build trees run to GBs)".to_string(),
+            installable: false,
+        }),
+        Some(free) => out.push(ToolStatus {
+            name: "disk space",
+            need: Need::Recommended,
+            found: true,
+            detail: format!("{free:.0} GB free"),
+            hint: String::new(),
+            installable: false,
+        }),
+        None => {}
+    }
 
     // Managed Graphsignal venv (installed by `setup-graphsignal`).
     let gs = std::env::current_dir()
@@ -415,9 +436,30 @@ pub fn render_table(status: &[ToolStatus]) -> String {
 
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>())
+        return s.to_string();
+    }
+    // Break at whitespace so the table doesn't cut mid-word.
+    let cut: String = s.chars().take(n.saturating_sub(1)).collect();
+    let cut = cut.rsplit_once(char::is_whitespace).map(|(h, _)| h).unwrap_or(&cut);
+    format!("{cut}…")
+}
+
+/// Free GB on the filesystem holding `path` (for build trees that run to GBs).
+/// `None` when it can't be determined.
+fn disk_free_gb(path: &std::path::Path) -> Option<f64> {
+    #[cfg(unix)]
+    {
+        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+        if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+            return None;
+        }
+        Some(st.f_bavail as f64 * st.f_frsize as f64 / 1e9)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
     }
 }
 
