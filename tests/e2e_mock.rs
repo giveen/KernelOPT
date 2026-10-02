@@ -35,7 +35,7 @@ fn happy_path_mock_walk() {
                 name: "submit_plan".into(),
                 arguments: serde_json::json!({"plan": {"change": "identity baseline walk"}}),
             }],
-            usage: Some(kernelopt::llm::Usage { prompt_tokens: 10, completion_tokens: 5 }),
+            usage: Some(kernelopt::llm::Usage { prompt_tokens: 10, completion_tokens: 5, cached_tokens: 0 }),
         },
         Completion {
             content: None,
@@ -43,7 +43,7 @@ fn happy_path_mock_walk() {
                 name: "submit_kernel".into(),
                 arguments: serde_json::json!({"kernel_source": candidate, "change_summary": "identity"}),
             }],
-            usage: Some(kernelopt::llm::Usage { prompt_tokens: 10, completion_tokens: 5 }),
+            usage: Some(kernelopt::llm::Usage { prompt_tokens: 10, completion_tokens: 5, cached_tokens: 0 }),
         },
     ];
 

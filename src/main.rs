@@ -1837,7 +1837,7 @@ fn analyze_run(run_id: &str, json: bool) -> Result<()> {
     let events = Journal::replay(&mock_runs_dir()?, run_id)?;
     let mut categories: BTreeMap<String, u32> = BTreeMap::new();
     let mut attempts: Vec<serde_json::Value> = Vec::new();
-    let mut llm: BTreeMap<String, (u32, u64)> = BTreeMap::new();
+    let mut llm: BTreeMap<String, (u32, u64, u64)> = BTreeMap::new();
     let mut plans: BTreeSet<String> = BTreeSet::new();
     let mut outcome: Option<(String, Option<f64>, Option<String>)> = None;
 
@@ -1863,10 +1863,11 @@ fn analyze_run(run_id: &str, json: bool) -> Result<()> {
                     "error": error.as_deref().map(|s| truncate_line(s, 140)),
                 }));
             }
-            Event::LlmCall { agent, prompt_tokens, completion_tokens } => {
+            Event::LlmCall { agent, prompt_tokens, completion_tokens, cached_tokens } => {
                 let e = llm.entry(agent.clone()).or_default();
                 e.0 += 1;
                 e.1 += prompt_tokens + completion_tokens;
+                e.2 += cached_tokens;
             }
             Event::RunFinished { outcome: o, speedup, root_cause, .. } => {
                 outcome = Some((o.clone(), *speedup, root_cause.clone()));
@@ -1875,9 +1876,11 @@ fn analyze_run(run_id: &str, json: bool) -> Result<()> {
         }
     }
 
-    let (total_calls, total_tokens) = llm
+    let (total_calls, total_tokens, total_cached) = llm
         .values()
-        .fold((0u32, 0u64), |(c, t), (c2, t2)| (c + c2, t + t2));
+        .fold((0u32, 0u64, 0u64), |(c, t, ch), (c2, t2, ch2)| {
+            (c + c2, t + t2, ch + ch2)
+        });
     let passes = categories.get("pass").copied().unwrap_or(0);
     let fails: u32 = categories.iter().filter(|(k, _)| *k != "pass").map(|(_, v)| v).sum();
 
@@ -1896,7 +1899,8 @@ fn analyze_run(run_id: &str, json: bool) -> Result<()> {
                 "unique_plans": plans.len(),
                 "llm_calls": total_calls,
                 "tokens": total_tokens,
-                "llm_by_agent": llm.iter().map(|(k, (c, t))| (k.clone(), serde_json::json!({"calls": c, "tokens": t}))).collect::<serde_json::Map<_, _>>(),
+                "cached_prompt_tokens": total_cached,
+                "llm_by_agent": llm.iter().map(|(k, (c, t, ch))| (k.clone(), serde_json::json!({"calls": c, "tokens": t, "cached": ch}))).collect::<serde_json::Map<_, _>>(),
             }))?
         );
         return Ok(());
@@ -1926,14 +1930,27 @@ fn analyze_run(run_id: &str, json: bool) -> Result<()> {
             .collect::<Vec<_>>()
             .join("  ")
     );
+    let cache_note = if total_cached > 0 {
+        format!(
+            "  (prefix cache: {} of prompt in, {:.0}% cached)",
+            total_cached,
+            100.0 * total_cached as f64 / total_tokens.max(1) as f64
+        )
+    } else {
+        "  (no prefix-cache reporting from the endpoint)".to_string()
+    };
     println!(
-        "llm: {} calls, {} tokens — {}",
+        "llm: {} calls, {} tokens — {}{}",
         total_calls,
         total_tokens,
         llm.iter()
-            .map(|(a, (c, t))| format!("{} {c}/{t}t", kernelopt::journal::agent_label(a)))
+            .map(|(a, (c, t, ch))| {
+                let c = if *ch > 0 { format!("{c}/{t}t+{ch}c") } else { format!("{c}/{t}t") };
+                format!("{} {c}", kernelopt::journal::agent_label(a))
+            })
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", "),
+        cache_note
     );
     for a in &attempts {
         println!(

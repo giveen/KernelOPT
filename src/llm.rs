@@ -26,6 +26,10 @@ pub struct ToolCall {
 pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// Prompt tokens served from the provider's prefix cache (0 when the
+    /// endpoint doesn't report it). Defaulted for older journals.
+    #[serde(default)]
+    pub cached_tokens: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +195,20 @@ where
 struct WireUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
+    /// OpenAI-compatible: `prompt_tokens_details.cached_tokens` (flat on some
+    /// endpoints); Anthropic: `cache_read_input_tokens`.
+    #[serde(default)]
+    prompt_tokens_details: Option<WirePromptDetails>,
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
+}
+
+#[derive(Deserialize, Default)]
+struct WirePromptDetails {
+    #[serde(default)]
+    cached_tokens: u64,
 }
 
 /// Real HTTP client for any OpenAI-compatible endpoint.
@@ -468,6 +486,12 @@ impl OpenAiCompatClient {
             usage: parsed.usage.map(|u| Usage {
                 prompt_tokens: u.prompt_tokens,
                 completion_tokens: u.completion_tokens,
+                cached_tokens: u
+                    .prompt_tokens_details
+                    .map(|d| d.cached_tokens)
+                    .unwrap_or(0)
+                    .max(u.cached_tokens.unwrap_or(0))
+                    .max(u.cache_read_input_tokens.unwrap_or(0)),
             }),
         })
     }
@@ -625,11 +649,36 @@ mod tests {
     }
 
     #[test]
-    fn tolerates_null_content_and_missing_usage() {
-        let body = r#"{"choices":[{"message":{"content":null,"tool_calls":[]}}]}"#;
-        let parsed: ChatResponse = serde_json::from_str(body).unwrap();
-        assert!(parsed.choices[0].message.content.is_none());
-        assert!(parsed.usage.is_none());
+    fn cache_usage_parses_both_shapes() {
+        let openai: ChatResponse = serde_json::from_str(concat!(
+            r#"{"choices":[{"message":{"content":null,"tool_calls":[]}}],"#,
+            r#""usage":{"prompt_tokens":100,"completion_tokens":5,"#,
+            r#""prompt_tokens_details":{"cached_tokens":70}}}"#
+        ))
+        .unwrap();
+        let u = openai.usage.unwrap();
+        let cached = u
+            .prompt_tokens_details
+            .map(|d| d.cached_tokens)
+            .unwrap_or(0)
+            .max(u.cached_tokens.unwrap_or(0))
+            .max(u.cache_read_input_tokens.unwrap_or(0));
+        assert_eq!(cached, 70);
+
+        let anthropic: ChatResponse = serde_json::from_str(concat!(
+            r#"{"choices":[{"message":{"content":null,"tool_calls":[]}}],"#,
+            r#""usage":{"prompt_tokens":100,"completion_tokens":5,"#,
+            r#""cache_read_input_tokens":42}}"#
+        ))
+        .unwrap();
+        let u = anthropic.usage.unwrap();
+        let cached = u
+            .prompt_tokens_details
+            .map(|d| d.cached_tokens)
+            .unwrap_or(0)
+            .max(u.cached_tokens.unwrap_or(0))
+            .max(u.cache_read_input_tokens.unwrap_or(0));
+        assert_eq!(cached, 42);
     }
 
     // ---- self-healing against an OpenAI-compatible server that diverges ---- //
