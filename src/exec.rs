@@ -182,18 +182,53 @@ pub fn ctest(build_dir: &Path, tests: &[String], timeout_secs: u64) -> Result<Va
 }
 
 /// Probe `--help` for supported flags (cheap: help exits before GPU init).
-fn bench_capabilities(binary: &Path, timeout_secs: u64) -> HashSet<String> {
+/// `--help` output (stdout+stderr) of a bench binary; empty on failure.
+fn bench_help_text(binary: &Path, timeout_secs: u64) -> String {
     let mut cmd = Command::new(binary);
     cmd.arg("--help");
-    let Ok(o) = run_capture(&mut cmd, timeout_secs) else {
-        return HashSet::new();
-    };
-    let text = format!("{}{}", o.stdout, o.stderr);
+    match run_capture(&mut cmd, timeout_secs) {
+        Ok(o) => format!("{}{}", o.stdout, o.stderr),
+        Err(_) => String::new(),
+    }
+}
+
+fn capabilities_from_help(text: &str) -> HashSet<String> {
     ["--csv-out", "--warmup", "--repeat", "--profile", "--t-sweep"]
         .into_iter()
         .filter(|f| text.contains(f))
         .map(String::from)
         .collect()
+}
+
+/// Required CLI args for a bench binary, parsed from its `--help` usage line.
+/// Usage lists required args before any `[optional]` section, e.g.
+///   `Usage: prog --n 5120 --k 6144|17408 [--policy a16|a4] …`
+/// Returns the `--flag value` pairs (first alternative for `a|b`).
+pub fn bench_required_args(binary: &Path, timeout_secs: u64) -> Vec<String> {
+    parse_required_usage(&bench_help_text(binary, timeout_secs))
+}
+
+fn parse_required_usage(text: &str) -> Vec<String> {
+    let Some(line) = text.lines().find(|l| l.contains("Usage:")) else {
+        return Vec::new();
+    };
+    let after = line.split("Usage:").nth(1).unwrap_or("");
+    let mut out: Vec<String> = Vec::new();
+    let mut pending: Option<String> = None;
+    // Skip the program name (first token), then read required `--flag value`
+    // pairs until the first optional section (`[`).
+    for tok in after.split_whitespace().skip(1) {
+        if tok.starts_with('[') {
+            break;
+        }
+        if tok.starts_with("--") {
+            pending = Some(tok.to_string());
+        } else if let Some(flag) = pending.take() {
+            out.push(flag);
+            out.push(tok.split('|').next().unwrap_or(tok).to_string());
+        }
+    }
+    out
 }
 
 /// Gate 4: run the bench `repeats` times, returning raw output per run.
@@ -210,9 +245,15 @@ pub fn bench(
     if !binary.exists() {
         bail!("bench binary not found: {}", binary.display());
     }
-    let caps = bench_capabilities(binary, 60);
+    let help = bench_help_text(binary, 60);
+    let caps = capabilities_from_help(&help);
     let mut argv: Vec<String> = vec![binary.to_string_lossy().to_string()];
     argv.extend(args.iter().cloned());
+    if args.is_empty() {
+        // Some benches require shape args (e.g. `--n 5120 --k 6144`) and exit
+        // otherwise; take them from the usage line unless the caller overrode.
+        argv.extend(parse_required_usage(&help));
+    }
     if let Some(c) = csv_out {
         if caps.contains("--csv-out") && !args.iter().any(|a| a == "--csv-out") {
             if let Some(p) = c.parent() {
@@ -616,6 +657,14 @@ mod tests {
         let gb = model_size_gb(&f.to_string_lossy()).unwrap();
         assert!((gb - 0.002).abs() < 1e-6, "{gb}");
         let _ = std::fs::remove_file(&f);
+    }
+
+    #[test]
+    fn parse_required_usage_reads_shape_args() {
+        let help = "Usage: /x/nvfp4_linear_add_bench --n 5120 --k 6144|17408 [--policy a16|a4] [--warmup N]\n";
+        assert_eq!(parse_required_usage(help), vec!["--n", "5120", "--k", "6144"]);
+        assert!(parse_required_usage("Usage: prog [options]\n").is_empty());
+        assert!(parse_required_usage("no usage here").is_empty());
     }
 
     #[test]
