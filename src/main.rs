@@ -584,6 +584,9 @@ struct LoopArgs {
     /// Executor retries K.
     #[arg(long)]
     retries: Option<u32>,
+    /// Cross-shape regression tolerance (default 1.01).
+    #[arg(long)]
+    regress_margin: Option<f64>,
 }
 
 fn hyper_from(llm: &LlmArgs, lp: &LoopArgs, default_t: u32) -> Hyper {
@@ -598,6 +601,10 @@ fn hyper_from(llm: &LlmArgs, lp: &LoopArgs, default_t: u32) -> Hyper {
         n_plans: lp.plans.or_else(|| env_u32("KERNELOPT_PLANS")).unwrap_or(4),
         k_retries: lp.retries.or_else(|| env_u32("KERNELOPT_RETRIES")).unwrap_or(4),
         b_beam: lp.beam.or_else(|| env_u32("KERNELOPT_BEAM")).unwrap_or(4),
+        regression_margin: lp
+            .regress_margin
+            .or_else(|| env_opt("KERNELOPT_REGRESS_MARGIN").and_then(|v| v.parse::<f64>().ok()))
+            .unwrap_or(1.01),
         ..Default::default()
     }
 }
@@ -1290,6 +1297,7 @@ fn run_single(
         toolchain: None,
         recent_results: Vec::new(),
         bench_options: None,
+        baseline_shapes: Vec::new(),
     };
     pipe.run()
 }
@@ -1594,8 +1602,16 @@ fn print_run_result(v: &serde_json::Value, show_paths: bool) {
     if let (Some(b), Some(f)) = (v["baseline_ms"].as_f64(), v["final_ms"].as_f64()) {
         println!("latency:    {b:.4} ms → {f:.4} ms");
     }
-    if speedup.is_none() {
-        println!("speedup:    not measured");
+    match speedup {
+        Some(s) => println!(
+            "speedup:    {s:.3}x{}",
+            if outcome == "fallback" {
+                "  (pinned shape only — rejected, see root cause)"
+            } else {
+                ""
+            }
+        ),
+        None => println!("speedup:    not measured"),
     }
     if let Some(sr) = v["stop_reason"].as_str().filter(|s| !s.is_empty()) {
         println!("stopped:    {sr}");

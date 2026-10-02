@@ -127,6 +127,9 @@ pub struct CudaPipeline<'a> {
     pub recent_results: Vec<String>,
     /// `--help` of the op's bench binary (available flags/regime), for the Planner.
     pub bench_options: Option<String>,
+    /// Baseline per-shape medians (from the baseline bench), for the search-time
+    /// cross-shape regression check.
+    pub baseline_shapes: Vec<crate::parse::BenchRow>,
     /// Effective bandwidth (GB/s) of the most recent bench's representative shape.
     pub last_bench_gbs: Option<f64>,
     /// Device memory roofline (GB/s) reported by the most recent bench.
@@ -531,7 +534,12 @@ impl<'a> CudaPipeline<'a> {
         }
 
         let baseline_ms = if self.target.timing {
-            let ms = self.bench(None).context("baseline bench")?;
+            let merged = self.bench_merged(None).context("baseline bench")?;
+            self.baseline_shapes = merged.rows.clone();
+            let ms = merged
+                .representative_us
+                .context("baseline bench returned no representative")?
+                / 1000.0;
             self.journal.record(&Event::StageCompleted {
                 stage: "bench_baseline".into(),
                 data: json!({"median_ms": ms}),
@@ -589,15 +597,6 @@ impl<'a> CudaPipeline<'a> {
         } else {
             self.build_dir.join("bench").join(b)
         })
-    }
-
-    /// Representative-shape median in ms (the Gate-4 number).
-    fn bench(&mut self, source: Option<&str>) -> Result<f64> {
-        let merged = self.bench_merged(source)?;
-        Ok(merged
-            .representative_us
-            .context("bench returned no representative_us")?
-            / 1000.0)
     }
 
     /// Full merged bench over every shape — feeds the cross-shape regression gate.
@@ -1312,8 +1311,8 @@ impl<'a> CudaPipeline<'a> {
             }
 
             let latency_ms = if self.target.timing {
-                match self.bench(Some(&candidate_source)) {
-                    Ok(ms) => Some(ms),
+                let merged = match self.bench_merged(Some(&candidate_source)) {
+                    Ok(m) => m,
                     Err(e) => {
                         let err = format!("bench failed: {e:#}");
                         self.journal.record(&Event::AttemptFailed {
@@ -1327,7 +1326,43 @@ impl<'a> CudaPipeline<'a> {
                         last_error = Some(err);
                         continue;
                     }
+                };
+                // Cross-shape regression check (cheap: the bench already reports
+                // every shape). Rejecting regressors here keeps them out of
+                // `best`, so a run can still end on a valid candidate instead of
+                // being rejected wholesale at finalize.
+                let regs: Vec<(String, f64)> = row_speedups(&self.baseline_shapes, &merged.rows)
+                    .into_iter()
+                    .filter(|(_, s)| *s < 1.0 / self.cfg.hyper.regression_margin)
+                    .collect();
+                if !regs.is_empty() {
+                    let err = format!(
+                        "regresses {} other shape(s) beyond {}: {}",
+                        regs.len(),
+                        self.cfg.hyper.regression_margin,
+                        regs.iter()
+                            .map(|(l, s)| format!("{l} {s:.3}x"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    self.progress(format!("  c{chain_idx} ✗ {err}"));
+                    self.journal.record(&Event::AttemptFailed {
+                        iteration,
+                        chain: chain_idx,
+                        attempt,
+                        category: "shape_regression".into(),
+                        error: err.clone(),
+                    })?;
+                    let _ = self.record_failure("shape_regression", &err, &mut last_fail_sig);
+                    self.tracker.record(
+                        &self.target.family.clone(),
+                        &crate::memory::strategy_tag(&plan.change),
+                        false,
+                    );
+                    last_error = Some(err);
+                    continue;
                 }
+                merged.representative_us.map(|u| u / 1000.0)
             } else {
                 None
             };
@@ -1870,7 +1905,7 @@ impl<'a> CudaPipeline<'a> {
         let shape_speedups = shape_speedups(&base_merged, &cand_merged);
         let regressions: Vec<(String, f64)> = shape_speedups
             .iter()
-            .filter(|(_, s)| *s < 1.0 / self.cfg.hyper.gamma)
+            .filter(|(_, s)| *s < 1.0 / self.cfg.hyper.regression_margin)
             .cloned()
             .collect();
         let shape_reg_ok = regressions.is_empty();
@@ -1993,10 +2028,10 @@ impl<'a> CudaPipeline<'a> {
             (
                 "fallback",
                 Some(format!(
-                    "candidate wins the pinned shape but regresses {} other shape(s) beyond γ={} \
-                     (overfit; baseline preserved): {}",
+                    "candidate wins the pinned shape but regresses {} other shape(s) beyond \
+                     tolerance {} (overfit; baseline preserved): {}",
                     regressions.len(),
-                    self.cfg.hyper.gamma,
+                    self.cfg.hyper.regression_margin,
                     regressions
                         .iter()
                         .map(|(l, s)| format!("{l} {s:.3}x"))
@@ -2525,6 +2560,29 @@ fn num_cpus() -> usize {
 }
 
 /// Median of a slice of floats (None when empty).
+/// Per-shape speedup (baseline / candidate) from single-row sets, keyed by
+/// label — the search-time cross-shape check (one bench each).
+fn row_speedups(
+    base: &[crate::parse::BenchRow],
+    cand: &[crate::parse::BenchRow],
+) -> Vec<(String, f64)> {
+    let map = |rows: &[crate::parse::BenchRow]| {
+        let mut m: std::collections::BTreeMap<String, f64> = Default::default();
+        for r in rows {
+            if r.median_us > 0.0 {
+                m.insert(r.label.clone(), r.median_us);
+            }
+        }
+        m
+    };
+    let b = map(base);
+    let c = map(cand);
+    b.iter()
+        .filter_map(|(label, bu)| c.get(label).map(|cu| (label.clone(), bu / cu)))
+        .filter(|(_, s)| s.is_finite())
+        .collect()
+}
+
 /// Per-shape speedup (baseline / candidate) from the final interleaved rounds,
 /// using the per-shape median across rounds. Only shapes present in both arms.
 fn shape_speedups(
@@ -2698,12 +2756,29 @@ impl ShapeGate {
 /// Parse the shape tuple out of a bench label, e.g. `add_bias [4304,4096 ]`.
 fn parse_bench_shape(label: Option<&str>) -> Option<Vec<i64>> {
     let label = label?;
-    let open = label.rfind('[')?;
-    let close = open + label[open..].find(']')?;
-    let dims: Vec<i64> = label[open + 1..close]
-        .split(',')
-        .filter_map(|s| s.trim().parse::<i64>().ok())
-        .collect();
+    // `add_bias [4304,4096]` style.
+    if let Some(open) = label.rfind('[') {
+        if let Some(close) = label[open..].find(']').map(|c| open + c) {
+            let dims: Vec<i64> = label[open + 1..close]
+                .split(',')
+                .filter_map(|s| s.trim().parse::<i64>().ok())
+                .collect();
+            if dims.len() >= 2 {
+                return Some(dims);
+            }
+        }
+    }
+    // `route=… M=5120 K=6144 T=2048` style: key=value dims in label order.
+    let mut dims: Vec<i64> = Vec::new();
+    for tok in label.split_whitespace() {
+        if let Some((k, v)) = tok.split_once('=') {
+            if matches!(k, "M" | "N" | "K" | "T" | "D" | "C" | "R" | "rows" | "cols" | "tokens") {
+                if let Ok(n) = v.trim_end_matches(',').parse::<i64>() {
+                    dims.push(n);
+                }
+            }
+        }
+    }
     (dims.len() >= 2).then_some(dims)
 }
 
@@ -3223,5 +3298,31 @@ mod verify_timeout_tests {
         assert!(e.contains("Expected 3, got 7"), "{e}");
         assert!(e.contains("assertion failed"), "{e}");
         assert!(!e.contains("noise line"), "{e}");
+    }
+
+    #[test]
+    fn parse_bench_shape_handles_brackets_and_keyvalues() {
+        assert_eq!(parse_bench_shape(Some("add_bias [4304,4096]")), Some(vec![4304, 4096]));
+        assert_eq!(
+            parse_bench_shape(Some("route=x M=5120 K=6144 T=2048")),
+            Some(vec![5120, 6144, 2048])
+        );
+        assert_eq!(parse_bench_shape(Some("route=x T=2048")), None); // one dim only
+        assert_eq!(parse_bench_shape(None), None);
+    }
+
+    #[test]
+    fn row_speedups_flags_regressions() {
+        use crate::parse::BenchRow;
+        let r = |l: &str, us: f64| BenchRow {
+            label: l.into(),
+            median_us: us,
+            ..Default::default()
+        };
+        let base = vec![r("a", 100.0), r("b", 200.0)];
+        let cand = vec![r("a", 90.0), r("b", 220.0)];
+        let s: std::collections::BTreeMap<_, _> = row_speedups(&base, &cand).into_iter().collect();
+        assert!((s["a"] - 100.0 / 90.0).abs() < 1e-9);
+        assert!((s["b"] - 200.0 / 220.0).abs() < 1e-9);
     }
 }

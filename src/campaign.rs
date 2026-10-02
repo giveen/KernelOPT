@@ -413,6 +413,7 @@ fn run_one_target(
         toolchain: None,
         recent_results: Vec::new(),
         bench_options: None,
+        baseline_shapes: Vec::new(),
     };
     pipe.run()
 }
