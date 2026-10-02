@@ -149,6 +149,20 @@ fn flatten(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Human-facing role name for an agent id, used in the live/watch view so the
+/// log reads as roles with purpose rather than "llm planner".
+pub fn agent_label(agent: &str) -> String {
+    match agent {
+        "planner" => "Strategist",
+        "executor" => "Kernel Smith",
+        "summarizer" => "Chronicler",
+        "analyst" => "Analyst",
+        "profiler" => "Profiler",
+        other => other,
+    }
+    .to_string()
+}
+
 /// One-line rendering of a journal event (full text, no truncation of plans/errors).
 pub fn format_event(e: &Event) -> String {
     match e {
@@ -180,7 +194,7 @@ pub fn format_event(e: &Event) -> String {
             s
         }
         Event::LlmCall { agent, prompt_tokens, completion_tokens } => {
-            format!("  llm {agent}: {prompt_tokens}+{completion_tokens} tok")
+            format!("  {}: {prompt_tokens}+{completion_tokens} tok", agent_label(agent))
         }
         Event::MemoryUpdated { action, direction } => {
             format!("  memory {action}: {}", direction.clone().unwrap_or_default())
@@ -200,8 +214,7 @@ pub fn format_event(e: &Event) -> String {
     }
 }
 
-/// Follow a journal file, printing new events to stderr, until `stop` is set.
-/// Used by `--watch` so the run renders its own live view in one terminal.
+/// Follow a journal file, printing new events to stderr, until `stop` is set./// Used by `--watch` so the run renders its own live view in one terminal.
 pub fn tail_journal(path: &Path, stop: &std::sync::atomic::AtomicBool) {
     let mut offset = 0u64;
     loop {
@@ -238,6 +251,14 @@ pub fn tail_journal(path: &Path, stop: &std::sync::atomic::AtomicBool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_labels_are_friendly() {
+        assert_eq!(agent_label("planner"), "Strategist");
+        assert_eq!(agent_label("executor"), "Kernel Smith");
+        assert_eq!(agent_label("summarizer"), "Chronicler");
+        assert_eq!(agent_label("unknown-agent"), "unknown-agent");
+    }
 
     #[test]
     fn roundtrip() {

@@ -1889,7 +1889,7 @@ fn analyze_run(run_id: &str, json: bool) -> Result<()> {
         total_calls,
         total_tokens,
         llm.iter()
-            .map(|(a, (c, t))| format!("{a} {c}/{t}t"))
+            .map(|(a, (c, t))| format!("{} {c}/{t}t", kernelopt::journal::agent_label(a)))
             .collect::<Vec<_>>()
             .join(", ")
     );
