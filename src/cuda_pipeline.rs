@@ -714,7 +714,12 @@ impl<'a> CudaPipeline<'a> {
                     Err(e) => return self.note_profile(&e.to_string()),
                 };
                 let mut v = vec![bin.to_string_lossy().to_string()];
-                v.extend(self.target.bench_args.iter().cloned());
+                if self.target.bench_args.is_empty() {
+                    // Some benches need shape args (e.g. --n 5120 --k 6144).
+                    v.extend(crate::exec::bench_required_args(&bin, 60));
+                } else {
+                    v.extend(self.target.bench_args.iter().cloned());
+                }
                 (v, 5u32)
             }
             Backend::Llamacpp => {

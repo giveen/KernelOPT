@@ -90,7 +90,7 @@ enum Cmd {
         #[arg(long)]
         build_dir: Option<String>,
         /// Extra argv forwarded to the op bench binary (repeatable).
-        #[arg(long = "bench-arg")]
+        #[arg(long = "bench-arg", allow_hyphen_values = true)]
         bench_args: Vec<String>,
         /// Model for the engine E2E check: `.ninfer`, `.gguf`, or an HF
         /// safetensors directory. Alias: --e2e-model.
@@ -153,7 +153,7 @@ enum Cmd {
         #[arg(long)]
         build_dir: Option<String>,
         /// Extra argv forwarded to `test-backend-ops perf` (repeatable).
-        #[arg(long = "bench-arg")]
+        #[arg(long = "bench-arg", allow_hyphen_values = true)]
         bench_args: Vec<String>,
         /// Model for the engine E2E check: `.gguf`, `.ninfer`, or HF safetensors dir.
         #[arg(long, visible_alias = "e2e-model")]
