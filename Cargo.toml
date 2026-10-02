@@ -17,6 +17,8 @@ reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], def
 ctrlc = "3"
 regex = "1"
 libc = "0.2"
+sha2 = "0.10"
+base64 = "0.22"
 
 [profile.release]
 opt-level = 2

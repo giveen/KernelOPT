@@ -25,8 +25,37 @@ pub fn explain(error: &str) -> Option<String> {
     let sym = symbol_from_error(error)?;
     lookup(&sym).map(|text| {
         let head = format!("CUDA DOCS for `{sym}` (verify availability/arguments for THIS arch/toolchain):");
-        format!("{head}\n{text}")
+        format!("{head}\n{}", clean_markdown(&text))
     })
+}
+
+/// Strip markdown link/anchor noise and collapses blank runs, so docs excerpts
+/// read cleanly inside a prompt or the terminal.
+pub fn clean_markdown(text: &str) -> String {
+    use regex::Regex;
+    let mut s = text.to_string();
+    // Drop bare heading anchors: `[#](#anchor "…")`.
+    s = Regex::new(r#"\[#\]\([^)]*\)"#)
+        .unwrap()
+        .replace_all(&s, "")
+        .to_string();
+    // `[text](#anchor "…")` and `[text](url)` -> `text`.
+    s = Regex::new(r#"\[([^\]]*)\]\([^)]*\)"#)
+        .unwrap()
+        .replace_all(&s, "$1")
+        .to_string();
+    for (from, to) in [
+        ("\\_", "_"),
+        ("\\*", "*"),
+        ("\\[", "["),
+        ("\\]", "]"),
+        ("\\#", "#"),
+        ("\\`", "`"),
+    ] {
+        s = s.replace(from, to);
+    }
+    s = Regex::new(r"\n{3,}").unwrap().replace_all(&s, "\n\n").to_string();
+    s.trim().to_string()
 }
 
 /// Look a symbol up in the configured docs sources.
@@ -41,7 +70,8 @@ pub fn lookup(symbol: &str) -> Option<String> {
     let token = std::env::var("KERNELOPT_DOCS_TOKEN")
         .ok()
         .or_else(|| std::env::var("KERNELOPT_CUDA_DOCS_TOKEN").ok())
-        .filter(|s| !s.trim().is_empty());
+        .filter(|s| !s.trim().is_empty())
+        .or_else(crate::docs_oauth::access_token);
     if let Some(token) = token {
         if let Some(text) = mcp_lookup(symbol, &token) {
             return Some(text);
