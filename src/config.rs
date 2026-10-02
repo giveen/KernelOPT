@@ -77,6 +77,10 @@ pub struct Hyper {
     /// Performance gate noise margin (paper γ=1.03).
     #[serde(default = "d_gamma")]
     pub gamma: f64,
+    /// Cross-shape regression tolerance: any other shape slower than baseline
+    /// by more than this fails (1.01 = 1%). Separate from the primary γ.
+    #[serde(default = "d_regress")]
+    pub regression_margin: f64,
     /// Experience memory capacity (paper Q=8).
     #[serde(default = "d_q")]
     pub q_memory: usize,
@@ -114,6 +118,9 @@ fn d_b() -> u32 {
 }
 fn d_gamma() -> f64 {
     1.03
+}
+fn d_regress() -> f64 {
+    1.01
 }
 fn d_q() -> usize {
     8

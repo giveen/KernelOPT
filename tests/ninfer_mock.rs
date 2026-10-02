@@ -121,6 +121,7 @@ fn ninfer_identity_walk_add_bias() {
         toolchain: None,
         recent_results: Vec::new(),
         bench_options: None,
+        baseline_shapes: Vec::new(),
     };
 
     let result = pipe.run().unwrap();
