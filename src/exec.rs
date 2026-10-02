@@ -166,7 +166,13 @@ pub fn ctest(build_dir: &Path, tests: &[String], timeout_secs: u64) -> Result<Va
     let mut cmd = Command::new("ctest");
     cmd.arg("--test-dir")
         .arg(build_dir)
-        .arg("--output-on-failure");
+        .arg("--output-on-failure")
+        // Per-test timeout: a hung test is killed and reported as ***Timeout
+        // (which parse_ctest handles) instead of burning the whole budget and
+        // yielding no signal about the other tests. The wall-clock kill in
+        // run_capture stays as the backstop.
+        .arg("--timeout")
+        .arg(timeout_secs.to_string());
     if !tests.is_empty() {
         let pat = format!(
             "^({})$",
