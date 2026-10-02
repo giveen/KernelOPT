@@ -1274,6 +1274,17 @@ impl<'a> CudaPipeline<'a> {
                     error: err.clone(),
                 })?;
                 let repeated = self.record_failure("compile", &err, &mut last_fail_sig);
+                // Attach a short docs excerpt for the failing symbol so the next
+                // attempt can fix the API usage instead of re-guessing.
+                let err = match crate::docs::explain(&err) {
+                    Some(docs) => {
+                        self.progress(format!(
+                            "  c{chain_idx} · attached CUDA docs for the failing symbol"
+                        ));
+                        format!("{err}\n\n{docs}")
+                    }
+                    None => err,
+                };
                 last_error = Some(err);
                 self.tracker.record(
                     &self.target.family.clone(),

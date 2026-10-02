@@ -403,6 +403,11 @@ enum Cmd {
         /// Run id.
         run_id: String,
     },
+    /// Look up a CUDA/CUB symbol in the docs sources (local headers / MCP).
+    Docs {
+        /// Symbol to look up, e.g. `cub::WarpMergeSort` or `__reduce_max_sync`.
+        symbol: String,
+    },
     /// List provider presets.
     Providers {
         /// Provider preset to probe (default: opencode-go).
@@ -1118,6 +1123,14 @@ fn main() -> Result<()> {
         Cmd::Report { run_id } => {
             let events = Journal::replay(&mock_runs_dir()?, &run_id)?;
             print_report(&run_id, &events);
+            Ok(())
+        }
+
+        Cmd::Docs { symbol } => {
+            match kernelopt::docs::lookup(&symbol) {
+                Some(text) => println!("{text}"),
+                None => eprintln!("no docs found for {symbol}"),
+            }
             Ok(())
         }
 
