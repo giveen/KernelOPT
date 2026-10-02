@@ -64,13 +64,163 @@ fn prog(out: &mut Vec<ToolStatus>, name: &'static str, need: Need, args: &[&str]
     });
 }
 
+/// Presence plus a minimum version floor (e.g. cmake 3.28, python3 3.10).
+/// Below the floor counts as missing, with the actual version shown.
+fn prog_min(
+    out: &mut Vec<ToolStatus>,
+    name: &'static str,
+    need: Need,
+    args: &[&str],
+    hint: &'static str,
+    min: (u64, u64, u64),
+    min_str: &'static str,
+) {
+    let (found, detail) = match on_path(name).and_then(|_| full_version_of(name, args)) {
+        Some((text, ver)) if ver >= min => (true, first_line(&text)),
+        Some((text, _)) => (
+            false,
+            format!("found {}, need >= {}", first_line(&text), min_str),
+        ),
+        None => (false, String::new()),
+    };
+    out.push(ToolStatus {
+        name,
+        need,
+        found,
+        detail,
+        hint: hint.to_string(),
+        installable: false,
+    });
+}
+
+/// Full `--version` output plus the first `X.Y[.Z]` found in it.
+fn full_version_of(tool: &str, args: &[&str]) -> Option<(String, (u64, u64, u64))> {
+    let out = std::process::Command::new(tool).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    parse_version(&text).map(|v| (text, v))
+}
+
+/// First `X.Y[.Z]` version triple in text.
+fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
+    let re = regex::Regex::new(r"(\d+)\.(\d+)(?:\.(\d+))?").ok()?;
+    let c = re.captures(text)?;
+    Some((
+        c[1].parse().ok()?,
+        c[2].parse().ok()?,
+        c.get(3).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0),
+    ))
+}
+
+fn first_line(text: &str) -> String {
+    text.lines()
+        .next()
+        .map(|l| l.trim().chars().take(80).collect())
+        .unwrap_or_default()
+}
+
+/// GPU presence: NVIDIA GPUs counted, else ROCm presence.
+fn gpu_status() -> ToolStatus {
+    let base = ToolStatus {
+        name: "GPU",
+        need: Need::Required,
+        found: false,
+        detail: String::new(),
+        hint: "no NVIDIA (nvidia-smi) or AMD (rocm-smi) GPU detected".to_string(),
+        installable: false,
+    };
+    if let Some(out) = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=name", "--format=csv,noheader"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+    {
+        let names: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        if !names.is_empty() {
+            return ToolStatus {
+                found: true,
+                detail: format!("{}× {}", names.len(), names[0]),
+                ..base
+            };
+        }
+    }
+    if on_path("rocm-smi").is_some() {
+        return ToolStatus {
+            found: true,
+            detail: "ROCm GPU (rocm-smi present)".to_string(),
+            ..base
+        };
+    }
+    base
+}
+
+fn euid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+/// Can this user collect GPU perf counters (what `ncu --set full` needs)?
+/// Pure for testing: root always can; otherwise the NVIDIA driver must not
+/// restrict profiling to admin (`RmProfilingAdminOnly: 0`).
+fn profiling_allowed(params: Option<&str>, uid: u32) -> bool {
+    if uid == 0 {
+        return true;
+    }
+    params
+        .and_then(|t| {
+            t.lines().find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                (k.trim() == "RmProfilingAdminOnly").then(|| v.trim() == "0")
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// NCU profiling-permission row. `None` when there is no NVIDIA stack to check
+/// (e.g. ROCm-only or CPU-only hosts).
+fn ncu_profiling_status() -> Option<ToolStatus> {
+    let has_nvidia = on_path("nvidia-smi").is_some() || on_path("ncu").is_some();
+    if !has_nvidia {
+        return None;
+    }
+    let params = std::fs::read_to_string("/proc/driver/nvidia/params").ok();
+    let ok = profiling_allowed(params.as_deref(), euid());
+    Some(ToolStatus {
+        name: "ncu profiling (perf counters)",
+        need: Need::Recommended,
+        found: ok,
+        detail: if ok {
+            if euid() == 0 {
+                "running as root".to_string()
+            } else {
+                "RmProfilingAdminOnly=0 (non-root profiling allowed)".to_string()
+            }
+        } else {
+            String::new()
+        },
+        hint: "run as root, grant CAP_SYS_ADMIN, or set NVreg_RestrictProfilingToAdminHost=0 via /etc/modprobe.d + reboot".to_string(),
+        installable: false,
+    })
+}
+
 /// Check every known external tool. Read-only; safe to run anywhere.
 pub fn check_all() -> Vec<ToolStatus> {
     let mut out = Vec::new();
 
     prog(&mut out, "git", Need::Required, &["--version"], "system package manager (git)");
-    prog(&mut out, "cmake", Need::Required, &["--version"], "system package manager (cmake); provides ctest");
-    prog(&mut out, "ctest", Need::Required, &["--version"], "ships with cmake");
+    // ninfer checkouts require cmake >= 3.28; the runner needs python >= 3.10.
+    prog_min(&mut out, "cmake", Need::Required, &["--version"], "system package manager (cmake); provides ctest", (3, 28, 0), "3.28");
+    prog_min(&mut out, "ctest", Need::Required, &["--version"], "ships with cmake", (3, 28, 0), "3.28");
+    prog_min(&mut out, "python3", Need::Required, &["--version"], "system package manager (python3)", (3, 10, 0), "3.10");
 
 
     // Either build runner is fine.
@@ -123,9 +273,12 @@ pub fn check_all() -> Vec<ToolStatus> {
             installable: false,
         }),
     }
-    prog(&mut out, "python3", Need::Required, &["--version"], "system package manager (python3)");
     prog(&mut out, "nsys", Need::Recommended, &["--version"], "ships with the CUDA toolkit");
     prog(&mut out, "ncu", Need::Recommended, &["--version"], "ships with the CUDA toolkit");
+    out.push(gpu_status());
+    if let Some(s) = ncu_profiling_status() {
+        out.push(s);
+    }
 
     // Managed Graphsignal venv (installed by `setup-graphsignal`).
     let gs = std::env::current_dir()
@@ -354,8 +507,27 @@ mod tests {
     }
 
     #[test]
-    fn table_renders_missing_with_hint() {
-        let t = vec![ToolStatus {
+    fn parse_version_reads_first_triple() {
+        assert_eq!(parse_version("cmake version 4.3.4"), Some((4, 3, 4)));
+        assert_eq!(parse_version("Python 3.14.7"), Some((3, 14, 7)));
+        assert_eq!(parse_version("nvcc: NVIDIA (R) Cuda compiler driver\nCuda compilation tools, release 13.3, V13.3.73"), Some((13, 3, 0)));
+        assert_eq!(parse_version("no version here"), None);
+        assert!((3, 27, 0) < (3, 28, 0));
+    }
+
+    #[test]
+    fn profiling_allowed_needs_root_or_unrestricted_driver() {
+        let open = "RmProfilingAdminOnly: 0\nOther: 1\n";
+        let locked = "RmProfilingAdminOnly: 1\n";
+        assert!(profiling_allowed(Some(open), 1000));
+        assert!(!profiling_allowed(Some(locked), 1000));
+        assert!(!profiling_allowed(None, 1000));
+        assert!(profiling_allowed(Some(locked), 0));
+        assert!(profiling_allowed(None, 0));
+    }
+
+    #[test]
+    fn table_renders_missing_with_hint() {        let t = vec![ToolStatus {
             name: "ncu",
             need: Need::Recommended,
             found: false,
