@@ -88,6 +88,60 @@ cp .env.example .env     # set NINFER_REPO / LLAMACPP_REPO / KERNELOPT_MODEL / O
 are optional. If you pass `--repo "$NINFER_REPO"`, export it first
 (`set -a; source .env; set +a`) — otherwise the shell expands it to empty.
 
+## Documentation lookup (CUDA/HIP API docs)
+
+When a candidate fails to compile, KernelOPT looks the offending symbol up in
+CUDA/HIP documentation and attaches a short excerpt to the Executor's retry, so
+the model fixes the API instead of re-guessing. You can also query it directly:
+
+```bash
+kernelopt docs cub::WarpMergeSort     # or: __reduce_max_sync, hipMalloc, rocwmma::…
+```
+
+Sources are tried in order — **stdio MCP → HTTP MCP → local headers** — and the
+first hit wins; a miss at one source falls through to the next.
+
+### NVIDIA CUDA docs (MCP, recommended)
+
+One-time login (OAuth: dynamic client registration + PKCE); the token is cached
+at `.kernelopt/docs_token.json` and **refreshed automatically**:
+
+```bash
+kernelopt docs --login     # opens an authorize URL; sign in with your NVIDIA account
+kernelopt docs "cub::WarpMergeSort 64-bit keys"
+```
+
+Or supply a token directly (no login):
+
+```bash
+export KERNELOPT_DOCS_TOKEN=<access-token>
+```
+
+### AMD ROCm / HIP
+
+Auto-enabled when ROCm is detected (`hipcc`/`rocm-smi`/`rocminfo`/`amdgpu-arch`
+on `PATH`, `ROCM_PATH`/`HIP_PATH`, or `/opt/rocm`); HIP symbols are then looked up
+in the local ROCm headers. To use AMD's `hip-docs-mcp` server instead, point at
+its command:
+
+```bash
+export KERNELOPT_DOCS_MCP_CMD="uv run --directory /path/to/intellikit/rocm_mcp hip-docs-mcp"
+```
+
+Force on/off with `KERNELOPT_DOCS_ROCM=1` / `=0`. (AMD's `rocm-mcp` package
+imports `amdsmi`, so the server needs ROCm installed to start.)
+
+| Env var | Purpose |
+|---|---|
+| `KERNELOPT_DOCS_TOKEN` | Bearer token for the HTTP docs MCP (NVIDIA `cuda-docs`). Alias: `KERNELOPT_CUDA_DOCS_TOKEN` |
+| `KERNELOPT_DOCS_URL` | Override the HTTP MCP endpoint (default: NVIDIA `cuda-docs`). Alias: `KERNELOPT_CUDA_DOCS_URL` |
+| `KERNELOPT_DOCS_MCP_CMD` | stdio MCP command (e.g. `hip-docs-mcp`); tried before HTTP |
+| `KERNELOPT_DOCS_ROCM` | `1`/`0` to force ROCm docs on/off (unset = auto-detect) |
+
+Everything is optional: with no config, lookups fall back to the **local
+CUDA/CCCL/ROCm headers** already on the machine, and only fire on a confident
+API symbol. See [docs/docs-lookup.md](docs/docs-lookup.md).
+
 ## Examples
 
 ### First time? Use the wizard
@@ -223,6 +277,7 @@ thinking level. See `.env.example` for all keys.
 | [docs/campaign.md](docs/campaign.md) | Campaign walkthrough: discovery, ordering, budgets, resume |
 | [docs/monitoring.md](docs/monitoring.md) | Live progress, what the LLM is doing, pausing (Ctrl-C), `watch`, campaign status |
 | [docs/kernel-editing.md](docs/kernel-editing.md) | How kernels are read, edited (full-file), isolated, and surfaced as a diff |
+| [docs/docs-lookup.md](docs/docs-lookup.md) | CUDA/HIP API docs lookup: NVIDIA `cuda-docs` MCP login, ROCm headers, `kernelopt docs` |
 | [docs/testing-kernel-wins.md](docs/testing-kernel-wins.md) | RST recommendations: oracles, benchmark controls, measured-shape coverage and kernel versus application wins |
 | [docs/model-e2e.md](docs/model-e2e.md) | Model-level (engine) verification: same tokens, not slower |
 | [docs/ninfer-mode.md](docs/ninfer-mode.md) | ninfer mapping (gates, workbench, prompts) |
