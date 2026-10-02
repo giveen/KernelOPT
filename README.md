@@ -80,8 +80,14 @@ cargo build --release        # binary: target/release/kernelopt
 
 ## Setup
 
+New machine? Start with the ordered checklist: **[docs/prereqs.md](docs/prereqs.md)**
+(GPU driver → CUDA toolkit → profiling permission → build tools → target
+checkout → LLM key + tool-call model → verify). Then:
+
 ```bash
 cp .env.example .env     # set NINFER_REPO / LLAMACPP_REPO / KERNELOPT_MODEL / OPENCODE_API_KEY
+kernelopt setup          # full prereq table
+kernelopt setup --smoke  # prove the compiler works (seconds, no GPU needed)
 ```
 
 `.env` is read automatically (real env wins), so `--repo`/`--provider`/`--model`
@@ -273,6 +279,7 @@ thinking level. See `.env.example` for all keys.
 |---|---|
 | [docs/cli.md](docs/cli.md) | **Every command and option**: what `discover`, `profile`, `campaign`, `run*` do, the full flag reference, and campaign option effects |
 | [docs/configuration.md](docs/configuration.md) | `.env`, providers, thinking level, `config.toml`, hyperparameters |
+| [docs/prereqs.md](docs/prereqs.md) | Ordered setup checklist: driver, CUDA toolkit, profiling permission, build tools, LLM key, verify |
 | [docs/outputs.md](docs/outputs.md) | Artifacts, run/campaign state, applying diffs, disk |
 | [docs/campaign.md](docs/campaign.md) | Campaign walkthrough: discovery, ordering, budgets, resume |
 | [docs/monitoring.md](docs/monitoring.md) | Live progress, what the LLM is doing, pausing (Ctrl-C), `watch`, campaign status |
