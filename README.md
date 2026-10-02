@@ -95,6 +95,20 @@ kernelopt setup --smoke  # prove the compiler works (seconds, no GPU needed)
 are optional. If you pass `--repo "$NINFER_REPO"`, export it first
 (`set -a; source .env; set +a`) — otherwise the shell expands it to empty.
 
+### Where the LLM should run
+
+KernelOPT talks to the optimizer LLM over HTTP, so the model itself needs no
+local GPU — and that is the recommended setup: point it at a cloud provider
+(`opencode-go` default, `openai`, `openrouter`) or an LLM server on **another
+machine**, and keep this machine's GPU entirely for compiling, benchmarking,
+and profiling your model.
+
+Serving the LLM on the *same* GPU (`ollama`, `vllm`, `lmstudio` locally) works
+but contends for VRAM with the target build, the benchmarks, and especially
+Gate 3 (engine E2E loads a whole model — tens of GB). Expect slower runs and
+possible OOMs; if you do it anyway, watch `nvidia-smi` and prefer smaller
+e2e models.
+
 ## Documentation lookup (CUDA/HIP API docs)
 
 When a candidate fails to compile, KernelOPT looks the offending symbol up and
