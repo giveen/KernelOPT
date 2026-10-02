@@ -866,7 +866,7 @@ impl<'a> CudaPipeline<'a> {
         recent_directions: &[String],
     ) -> Result<PlannedChange> {
         // Static system prompt so the request prefix is cacheable by the provider.
-        let system = self.render_prompt("cuda-planner.md", &json!({}))?;
+        let system = self.render_prompt("cuda-planner.md", &json!({"backend": self.target.backend.as_str()}))?;
         let (context_label, context) = self.planner_context(kernel_source);
         // Bound the profiling context so it doesn't dominate the prompt.
         let ctx_str = truncate_chars(&profiling_ctx.to_string(), 1500);
@@ -1182,7 +1182,7 @@ impl<'a> CudaPipeline<'a> {
             EditMode::Patch => "cuda-executor-patch.md",
             EditMode::Full => "cuda-executor.md",
         };
-        let system = self.render_prompt(prompt_file, &json!({}))?;
+        let system = self.render_prompt(prompt_file, &json!({"backend": self.target.backend.as_str()}))?;
         if self.edit_mode == EditMode::Full && kernel_source.chars().count() > EXECUTOR_WARN_CHARS {
             self.progress(format!(
                 "  warning: {} is {} chars — full-file submission may exceed model output limits; consider a smaller --kernel-file",
