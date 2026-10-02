@@ -14,9 +14,9 @@ These prompts implement the multi-agent loop described in:
 | `summarizer.md` | Summarizer (experience memory) — adapted from the paper's appendix |
 | `profiler.md` | Profiler (NCU configuration) |
 | `codegen.md`, `fusion.md` | Inductor-aware synthesis / fusion grouping |
-| `cuda-planner.md` | Planner for CUDA targets (ninfer / llama.cpp) — this project |
-| `cuda-executor.md` | Executor, full-file edit mode — this project |
-| `cuda-executor-patch.md` | Executor, patch (unified-diff) edit mode — this project |
+| `cuda-planner.md` | Planner for CUDA targets (ninfer / llama.cpp / custom) — this project. Takes `{{backend}}` |
+| `cuda-executor.md` | Executor, full-file edit mode — this project. Takes `{{backend}}` |
+| `cuda-executor-patch.md` | Executor, patch (unified-diff) edit mode — this project. Takes `{{backend}}` |
 
 Templates use `{{var}}` placeholders rendered by `src/prompts.rs`. The prompts
 adapted from the paper are condensed there; the versions here are the working,
