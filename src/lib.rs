@@ -26,6 +26,7 @@ pub mod pipeline;
 pub mod prompts;
 pub mod runner_bridge;
 pub mod search;
+pub mod setup;
 pub mod signals;
 pub mod tools;
 pub mod wizard;
