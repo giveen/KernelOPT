@@ -1941,10 +1941,23 @@ impl<'a> CudaPipeline<'a> {
         stop_reason: &str,
     ) -> Result<PipelineResult> {
         self.stage_start("finalize", "rebuilding the winner and running the gates");
-        // Materialize the winner, rebuild, re-test (Gates 1–2).
+        // Materialize the winner, rebuild, re-test (Gates 1–2). A hung or
+        // failing re-verify must fail the gate, not unwind the run: the winner
+        // simply didn't survive rebuild/re-test, so this becomes fallback with
+        // a closed journal (recoverable, resumable) instead of an aborted target.
         self.materialize_winner(&best)?;
         let compile = self.compile_now()?;
-        let verify = self.verify_now()?;
+        let (verify, verify_err, verify_timed_out) = match self.verify_now() {
+            Ok(v) => (v, None, false),
+            Err(e) => {
+                let timed_out = crate::exec::is_timeout(&e);
+                (
+                    serde_json::json!({"passed": false}),
+                    Some(format!("{e:#}")),
+                    timed_out,
+                )
+            }
+        };
         let gate1_2 = compile["passed"] == json!(true) && verify["passed"] == json!(true);
 
         // Gate 4: interleaved fresh baseline/candidate benches so drift cancels
@@ -2167,7 +2180,16 @@ impl<'a> CudaPipeline<'a> {
                 )),
             )
         } else if !gate1_2 {
-            ("fallback", Some("winner failed to rebuild/re-test (baseline preserved)".into()))
+            let why = match verify_err {
+                Some(e) if verify_timed_out => {
+                    format!("winner re-verify timed out (baseline preserved): {e}")
+                }
+                Some(e) => {
+                    format!("winner failed to rebuild/re-test (baseline preserved): {e}")
+                }
+                None => "winner failed to rebuild/re-test (baseline preserved)".to_string(),
+            };
+            ("fallback", Some(why))
         } else if !gate4 {
             ("fallback", Some("winner did not beat the perf gate γ (baseline preserved)".into()))
         } else {
@@ -2450,16 +2472,35 @@ impl<'a> CudaPipeline<'a> {
         let base_ref = self.base_sha.clone().unwrap_or_else(|| "HEAD".into());
 
         // 1) Validate the generated cases against the baseline (trusted-correct).
+        // A verify *error* (timeout, runner failure) means "could not
+        // determine", not "candidate wrong": restore the test file and skip
+        // the gate instead of unwinding the run.
         self.revert_ref(&base_ref)?;
         std::fs::write(&path, &patched)?;
         let _ = self.compile_now()?;
-        let base = self.verify_now()?;
+        let base = match self.verify_now() {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = std::fs::write(&path, &original);
+                return Ok(ShapeGate::Skipped(format!(
+                    "baseline shape-case verify errored, gate not used: {e:#}"
+                )));
+            }
+        };
 
         // 2) The same cases against the candidate.
         self.materialize_winner(best)?;
         std::fs::write(&path, &patched)?;
         let _ = self.compile_now()?;
-        let cand = self.verify_now()?;
+        let cand = match self.verify_now() {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = std::fs::write(&path, &original);
+                return Ok(ShapeGate::Skipped(format!(
+                    "candidate shape-case verify errored, gate not used: {e:#}"
+                )));
+            }
+        };
 
         // Restore the test and leave the worktree at the winner for the diff.
         std::fs::write(&path, &original)?;

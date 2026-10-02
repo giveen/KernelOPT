@@ -329,6 +329,15 @@ pub fn run_campaign(
                 eprintln!("  -> failed: {e:#}");
                 state.targets[idx].status = "failed".into();
                 state.targets[idx].error = Some(format!("{e:#}"));
+                // The run is dead but its journal survives: recover LLM usage
+                // from it so budget accounting stays honest across resumes.
+                // (Delta-accounted like account(), so a resumed target that
+                // later succeeds is never double-counted.)
+                let (calls, toks) = journal_usage(&cfg.runs_dir, state.targets[idx].run_id.as_deref());
+                state.llm_calls += calls.saturating_sub(state.targets[idx].llm_calls);
+                state.tokens += toks.saturating_sub(state.targets[idx].tokens);
+                state.targets[idx].llm_calls = calls;
+                state.targets[idx].tokens = toks;
                 state.cursor += 1;
                 processed += 1;
             }
@@ -443,6 +452,25 @@ fn account(state: &mut CampaignState, idx: usize, res: &PipelineResult) {
     state.targets[idx].tokens = res.tokens;
 }
 
+/// (calls, tokens) summed from a run's journal. Used when the run itself
+/// errored out and there is no PipelineResult to account from.
+fn journal_usage(runs_dir: &std::path::Path, run_id: Option<&str>) -> (u64, u64) {
+    let Some(id) = run_id else {
+        return (0, 0);
+    };
+    let Ok(events) = Journal::replay(runs_dir, id) else {
+        return (0, 0);
+    };
+    events.iter().fold((0u64, 0u64), |(c, t), e| match e {
+        crate::journal::Event::LlmCall {
+            prompt_tokens,
+            completion_tokens,
+            ..
+        } => (c + 1, t + prompt_tokens + completion_tokens),
+        _ => (c, t),
+    })
+}
+
 /// Persist cross-target learning so `--resume` does not relearn it.
 fn save_campaign_memory(
     dir: &Path,
@@ -531,6 +559,34 @@ mod tests {
         assert_eq!(s["optimized"], 1);
         assert_eq!(s["failed"], 1);
         assert_eq!(s["best_speedup"]["op"], "a");
+    }
+
+    #[test]
+    fn journal_usage_sums_journaled_calls() {
+        use crate::journal::Event;
+        let dir = std::env::temp_dir().join(format!("kopt-acct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut j = Journal::create(&dir, "r1").unwrap();
+        j.record(&Event::LlmCall {
+            agent: "planner".into(),
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            cached_tokens: 0,
+        })
+        .unwrap();
+        j.record(&Event::LlmCall {
+            agent: "executor".into(),
+            prompt_tokens: 300,
+            completion_tokens: 40,
+            cached_tokens: 0,
+        })
+        .unwrap();
+        drop(j);
+        assert_eq!(journal_usage(&dir, Some("r1")), (2, 460));
+        assert_eq!(journal_usage(&dir, Some("missing")), (0, 0));
+        assert_eq!(journal_usage(&dir, None), (0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
