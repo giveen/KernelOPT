@@ -428,6 +428,9 @@ enum Cmd {
         /// Don't ask for confirmation.
         #[arg(long)]
         yes: bool,
+        /// Compile a minimal CUDA kernel to prove the toolchain works.
+        #[arg(long)]
+        smoke: bool,
     },
     /// List provider presets.
     Providers {
@@ -1191,9 +1194,15 @@ fn main() -> Result<()> {
             Ok(())
         }
 
-        Cmd::Setup { install, yes } => {
+        Cmd::Setup { install, yes, smoke } => {
             let status = kernelopt::setup::check_all();
             println!("{}", kernelopt::setup::render_table(&status));
+            if smoke {
+                match kernelopt::setup::smoke() {
+                    Ok(msg) => println!("smoke: {msg}"),
+                    Err(e) => eprintln!("smoke FAILED: {e:#}"),
+                }
+            }
             let missing: Vec<_> = status.iter().filter(|t| !t.found && t.installable).collect();
             if !install {
                 if !missing.is_empty() {
@@ -1576,6 +1585,37 @@ fn wizard(
     save: bool,
     llm: LlmArgs,
 ) -> Result<()> {
+    // 0. Prereqs first: fail fast on missing required tools instead of
+    // burning a run 30 minutes in. Recommended-but-missing only warns.
+    {
+        let status = kernelopt::setup::check_all();
+        let missing_req: Vec<_> = status
+            .iter()
+            .filter(|t| !t.found && t.need == kernelopt::setup::Need::Required)
+            .collect();
+        if !missing_req.is_empty() {
+            println!("missing required tools (run `kernelopt setup` for the full table):");
+            for t in missing_req {
+                println!("  {} — {}", t.name, t.hint);
+            }
+            anyhow::bail!("fix the tools above, then re-run the wizard");
+        }
+        let missing_rec: Vec<_> = status
+            .iter()
+            .filter(|t| !t.found && t.need == kernelopt::setup::Need::Recommended)
+            .collect();
+        if !missing_rec.is_empty() && !yes {
+            println!(
+                "note: optional-but-recommended missing: {}",
+                missing_rec
+                    .iter()
+                    .map(|t| t.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+
     // 1. Target checkout: flag -> env -> prompt.
     let repo_spec = repo
         .or_else(|| env_opt("NINFER_REPO"))
@@ -1837,25 +1877,41 @@ fn prompt_llm(mut resolved: ResolvedLlm) -> Result<(String, String)> {
             "\nOptimizer LLM: {}/{}",
             resolved.provider, resolved.model
         );
-        match probe_llm(
+        // Only default to "Use it?" when the probe is fully healthy; a broken
+        // model must be an explicit opt-in, never an Enter key away.
+        let healthy = match probe_llm(
             &resolved.provider,
             &resolved.model,
             resolved.base_url.as_deref(),
             resolved.api_key.as_deref(),
         ) {
             Ok(p) => match (p.models, p.tool_ok) {
-                (Some(n), Some(true)) => println!("  probe: OK — {n} models, tool call works"),
-                (Some(n), Some(false)) => println!(
-                    "  probe: WARNING — {n} models, but no tool call; the pipeline needs tool calls"
-                ),
-                (_, _) => println!(
-                    "  probe: {}",
-                    p.error.unwrap_or_else(|| "inconclusive".into())
-                ),
+                (Some(n), Some(true)) if p.model_listed => {
+                    println!("  probe: OK — {n} models, tool call works");
+                    true
+                }
+                (Some(n), Some(true)) => {
+                    println!("  probe: WARNING — {n} models and tool call works, but {0:?} is not in the model list", resolved.model);
+                    false
+                }
+                (Some(n), Some(false)) => {
+                    println!("  probe: WARNING — {n} models, but no tool call; the pipeline needs tool calls");
+                    false
+                }
+                (_, _) => {
+                    println!(
+                        "  probe: {}",
+                        p.error.unwrap_or_else(|| "inconclusive".into())
+                    );
+                    false
+                }
             },
-            Err(e) => println!("  probe failed: {e:#}"),
-        }
-        if confirm("Use it?", true)? {
+            Err(e) => {
+                println!("  probe failed: {e:#}");
+                false
+            }
+        };
+        if confirm("Use it?", healthy)? {
             return Ok((resolved.provider, resolved.model));
         }
         let provider = ask_line(&format!("provider [{}]: ", resolved.provider))?;

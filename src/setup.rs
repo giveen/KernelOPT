@@ -342,6 +342,54 @@ pub fn check_all() -> Vec<ToolStatus> {
     out
 }
 
+/// Smoke test: compile a minimal CUDA kernel with nvcc (or hipcc). Proves the
+/// compiler + headers work without a full repo build. Returns a summary line.
+pub fn smoke() -> Result<String> {
+    const SRC: &str = r#"
+__global__ void kopt_smoke(float *x) { x[threadIdx.x] += 1.0f; }
+"#;
+    let (tool, flag) = if std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join("nvcc").exists()))
+        .unwrap_or(false)
+    {
+        ("nvcc", "--ptx")
+    } else if std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join("hipcc").exists()))
+        .unwrap_or(false)
+    {
+        ("hipcc", "--genco")
+    } else {
+        anyhow::bail!("no nvcc or hipcc on PATH (CUDA toolkit or ROCm required)");
+    };
+    let dir = std::env::temp_dir().join(format!("kopt-smoke-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let src = dir.join("smoke.cu");
+    std::fs::write(&src, SRC)?;
+    let out = std::process::Command::new(tool)
+        .arg(flag)
+        .arg(&src)
+        .arg("-o")
+        .arg(dir.join("smoke.out"))
+        .output()
+        .with_context(|| format!("spawning {tool}"))?;
+    let _ = std::fs::remove_dir_all(&dir);
+    if !out.status.success() {
+        anyhow::bail!(
+            "{tool} smoke compile failed: {}",
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+            .trim()
+            .chars()
+            .take(600)
+            .collect::<String>()
+        );
+    }
+    Ok(format!("{tool} compiled a minimal kernel (headers + driver toolchain OK)"))
+}
+
 /// Render the check table for humans.
 pub fn render_table(status: &[ToolStatus]) -> String {
     let mut s = String::from("tool                     need         status\n");
