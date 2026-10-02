@@ -273,9 +273,13 @@ impl<'a> CudaPipeline<'a> {
     fn record_failure(&mut self, category: &str, error: &str, prev: &mut Option<String>) -> bool {
         let sig = failure_signature(category, error);
         let repeated_compile = category == "compile" && prev.as_deref() == Some(sig.as_str());
-        *prev = Some(sig.clone());
-        if !self.recent_failures.contains(&sig) {
-            self.recent_failures.push(sig);
+        *prev = Some(sig);
+        // Keep a richer, single-line signature for the Planner — compile and
+        // correctness errors usually explain themselves on later lines too.
+        let compact = error.split_whitespace().collect::<Vec<_>>().join(" ");
+        let rich = format!("{category}: {}", truncate_chars(&compact, 260));
+        if !self.recent_failures.contains(&rich) {
+            self.recent_failures.push(rich);
             let n = self.recent_failures.len();
             if n > 6 {
                 self.recent_failures.drain(0..n - 6);
@@ -358,8 +362,21 @@ impl<'a> CudaPipeline<'a> {
         truncate_chars(&out, 3000)
     }
 
-    fn render_prompt(&self, template: &str, vars: &serde_json::Value) -> Result<String> {
-        let path = self.cfg.prompts_dir.join(template);
+    /// Excerpt of the op's own tests — the concrete correctness invariants a
+    /// candidate must preserve (padding/valid-rows, tie-breaking, dtype rules).
+    fn test_contract(&self) -> String {
+        let mut out = String::new();
+        for rel in &self.target.test_sources {
+            let path = self.worktree.join(rel);
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                out.push_str(&format!("\n// {rel}\n{}\n", truncate_chars(&text, 3500)));
+                break; // one test file is enough
+            }
+        }
+        truncate_chars(&out, 3500)
+    }
+
+    fn render_prompt(&self, template: &str, vars: &serde_json::Value) -> Result<String> {        let path = self.cfg.prompts_dir.join(template);
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading prompt template {}", path.display()))?;
         Ok(crate::prompts::render(&raw, vars))
@@ -820,13 +837,21 @@ impl<'a> CudaPipeline<'a> {
         // Bound the profiling context so it doesn't dominate the prompt.
         let ctx_str = truncate_chars(&profiling_ctx.to_string(), 1500);
         // Stable prefix first (target, contract, source/outline, profiling)…
+        let tc = self.test_contract();
+        let contract_block = if tc.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                "CORRECTNESS CONTRACT (from the op's tests — your change must preserve these invariants):\n{tc}\n\n"
+            )
+        };
         let mut user = format!(
             "BACKEND: {backend}\nOP: {op}  (family: {family}{variant})\n\
              TARGET KERNEL FILE (editable — the ONLY file you may change): {file}\n\
              ALL KERNEL FILES: {files:?}\n\
              READ-ONLY CONTEXT (launcher/dispatch/wrapper/plan): {context:?}\n\
              CONTRACT HEADER (read-only semantic authority — plan changes to the kernel only):\n{authority}\n\n\
-             {label}:\n{context_block}\n\n\
+             {contract_block}{label}:\n{context_block}\n\n\
              PROFILING CONTEXT:\n{ctx}\n",
             backend = self.target.backend.as_str(),
             op = self.target.op,
@@ -836,6 +861,7 @@ impl<'a> CudaPipeline<'a> {
             files = self.target.kernel_files,
             context = self.target.context_files,
             authority = self.authority_block(),
+            contract_block = contract_block,
             label = context_label,
             context_block = context,
             ctx = ctx_str,
@@ -1042,14 +1068,23 @@ impl<'a> CudaPipeline<'a> {
                 kernel_source.chars().count()
             ));
         }
+        let tc = self.test_contract();
+        let contract_block = if tc.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                "CORRECTNESS CONTRACT (from the op's tests — your change must preserve these invariants):\n{tc}\n\n"
+            )
+        };
         let base_user = format!(
             "BACKEND: {backend}\nTARGET FILE: {file}\n\n\
              CONTRACT HEADER (read-only semantic authority — do not change its semantics):\n{authority}\n\n\
-             CURRENT CONTENT:\n```cuda\n{src}\n```\n\n\
+             {contract_block}CURRENT CONTENT:\n```cuda\n{src}\n```\n\n\
              OPTIMIZATION PLAN:\n{plan}",
             backend = self.target.backend.as_str(),
             file = self.target.target_file,
             authority = self.authority_block(),
+            contract_block = contract_block,
             src = kernel_source,
             plan = plan.change,
         );
@@ -2847,20 +2882,55 @@ fn format_compiler_errors(compile: &serde_json::Value) -> String {
 }
 
 fn format_verify_failure(verify: &serde_json::Value) -> String {
-    let failing = verify["failing_cases"].as_array().cloned().unwrap_or_default();
-    if !failing.is_empty() {
-        let names: Vec<String> = failing
-            .iter()
-            .filter_map(|c| c["name"].as_str().map(String::from))
-            .take(8)
-            .collect();
-        return format!("correctness failed: {}", names.join("; "));
+    let suite = verify["suite_output"].as_str().unwrap_or("");
+    let names: Vec<String> = verify["failing_cases"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| c["name"].as_str().map(String::from))
+                .take(8)
+                .collect()
+        })
+        .unwrap_or_default();
+    let head = if names.is_empty() {
+        format!("correctness failed (exit {:?})", verify["exit_code"])
+    } else {
+        format!("correctness failed: {}", names.join("; "))
+    };
+    let excerpt = verify_excerpt(suite);
+    if !excerpt.is_empty() {
+        return format!("{head}\n  {excerpt}");
     }
-    format!(
-        "correctness failed (exit {:?}): {}",
-        verify["exit_code"],
-        verify["suite_output"].as_str().unwrap_or("").chars().take(1500).collect::<String>()
-    )
+    let tail: String = suite.chars().take(1500).collect();
+    if tail.trim().is_empty() {
+        head
+    } else {
+        format!("{head}: {tail}")
+    }
+}
+
+/// Lines that actually explain a test failure (assertion / expected / mismatch /
+/// exception), so the model sees the cause, not just the failing test's name.
+fn verify_excerpt(suite: &str) -> String {
+    let keys = [
+        "assert", "expect", "mismatch", "fail", "error", "differ", "got", "want", "nan", "==",
+        "!=",
+    ];
+    let mut out: Vec<String> = Vec::new();
+    for line in suite.lines() {
+        let l = line.trim();
+        if l.is_empty() {
+            continue;
+        }
+        let low = l.to_ascii_lowercase();
+        if keys.iter().any(|k| low.contains(k)) {
+            out.push(l.chars().take(220).collect());
+            if out.len() >= 6 {
+                break;
+            }
+        }
+    }
+    out.join("\n  ")
 }
 
 fn strip_code_fences(s: &str) -> String {
@@ -3112,5 +3182,14 @@ mod verify_timeout_tests {
         assert!(v.contains(&vec![4304, 65535]));
         assert!(v.len() <= 5);
         assert_eq!(shape_variants(&[1, 1]), vec![vec![1, 1]]);
+    }
+
+    #[test]
+    fn verify_excerpt_picks_cause_lines() {
+        let suite = "Test #1: x\n  Expected 3, got 7 (mismatch)\nnoise line\n  assertion failed: a == b\n";
+        let e = verify_excerpt(suite);
+        assert!(e.contains("Expected 3, got 7"), "{e}");
+        assert!(e.contains("assertion failed"), "{e}");
+        assert!(!e.contains("noise line"), "{e}");
     }
 }
