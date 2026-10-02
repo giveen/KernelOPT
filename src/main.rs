@@ -1404,6 +1404,7 @@ fn run_single(
         recent_failures: Vec::new(),
         toolchain: None,
         recent_results: Vec::new(),
+        regressed_shapes: Vec::new(),
         bench_options: None,
         baseline_shapes: Vec::new(),
         codemap: None,

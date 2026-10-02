@@ -125,6 +125,9 @@ pub struct CudaPipeline<'a> {
     /// Measured speedup of recent attempts (`<strategy>: <x>`), so the Planner
     /// sees what actually trends up, not just plan text.
     pub recent_results: Vec<String>,
+    /// Shape labels already rejected for regressing (deduped, capped), so the
+    /// Planner stops trading them off.
+    pub regressed_shapes: Vec<String>,
     /// Structural code map of the worktree (callers/impact), when the
     /// codebase-memory-mcp binary is available. `None` = grep fallback.
     pub codemap: Option<crate::codemap::CodeMap>,
@@ -882,6 +885,12 @@ impl<'a> CudaPipeline<'a> {
             ),
             None => String::new(),
         };
+        // Bench shapes are fixed for the whole run, so this block is stable
+        // (cache-friendly): every measured shape, with the gate shape marked.
+        let shapes_block = match shapes_block(&self.baseline_shapes, self.last_bench_label.as_deref()) {
+            Some(s) => format!("BENCH SHAPES (all measured workloads — a win must hold on ALL of these, not just the gate shape):\n{s}\n\n"),
+            None => String::new(),
+        };
         // Caller context, computed once per run: who calls the edited kernels.
         // A signature change that breaks these callers can never compile, so
         // the model must keep signatures stable (it cannot edit callers).
@@ -904,7 +913,7 @@ impl<'a> CudaPipeline<'a> {
              READ-ONLY CONTEXT (launcher/dispatch/wrapper/plan): {context:?}\n\
              CONTRACT HEADER (read-only semantic authority — plan changes to the kernel only):\n{authority}\n\n\
              {contract_block}{label}:\n{context_block}\n\n\
-             PROFILING CONTEXT:\n{ctx}\n{bench_block}{caller_block}",
+             PROFILING CONTEXT:\n{ctx}\n{bench_block}{caller_block}{shapes_block}",
             backend = self.target.backend.as_str(),
             op = self.target.op,
             family = self.target.family,
@@ -916,6 +925,7 @@ impl<'a> CudaPipeline<'a> {
             contract_block = contract_block,
             bench_block = bench_block,
             caller_block = caller_block,
+            shapes_block = shapes_block,
             label = context_label,
             context_block = context,
             ctx = ctx_str,
@@ -956,6 +966,13 @@ impl<'a> CudaPipeline<'a> {
                 "\n\nRECENT RESULTS (direction → measured speedup on the gate shape; \
                  lean into what trends up, avoid what regressed):\n{}",
                 self.recent_results.join("\n")
+            ));
+        }
+        if !self.regressed_shapes.is_empty() {
+            user.push_str(&format!(
+                "\n\nREGRESSED SHAPES (candidates already rejected for slowing these — \
+                 do not trade them off for the gate shape):\n{}",
+                self.regressed_shapes.join(", ")
             ));
         }
 
@@ -1455,6 +1472,15 @@ impl<'a> CudaPipeline<'a> {
                     .filter(|(_, s)| *s < 1.0 / self.cfg.hyper.regression_margin)
                     .collect();
                 if !regs.is_empty() {
+                    for (label, _) in &regs {
+                        if !self.regressed_shapes.iter().any(|s| s == label) {
+                            self.regressed_shapes.push(label.clone());
+                        }
+                    }
+                    let n = self.regressed_shapes.len();
+                    if n > 12 {
+                        self.regressed_shapes.drain(0..n - 12);
+                    }
                     let err = format!(
                         "regresses {} other shape(s) beyond {}: {}",
                         regs.len(),
@@ -2743,6 +2769,37 @@ fn row_speedups(
         .collect()
 }
 
+/// Render the bench's shape list for the Planner: `label: median`, with the
+/// gate (pinned) shape marked. Smallest shapes first — those are the ones that
+/// regress. Capped; `None` when there is nothing to show.
+fn shapes_block(shapes: &[crate::parse::BenchRow], pinned: Option<&str>) -> Option<String> {
+    if shapes.is_empty() {
+        return None;
+    }
+    const MAX: usize = 15;
+    let mut rows: Vec<&crate::parse::BenchRow> = shapes.iter().collect();
+    rows.sort_by(|a, b| {
+        a.median_us
+            .partial_cmp(&b.median_us)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut lines: Vec<String> = rows
+        .iter()
+        .take(MAX)
+        .map(|r| {
+            let mark = match pinned {
+                Some(p) if p == r.label => "  <-- gate shape",
+                _ => "",
+            };
+            format!("{}: {:.3} ms{}", r.label, r.median_us / 1000.0, mark)
+        })
+        .collect();
+    if rows.len() > MAX {
+        lines.push(format!("… plus {} more shapes (all must hold)", rows.len() - MAX));
+    }
+    Some(lines.join("\n"))
+}
+
 /// Per-shape speedup (baseline / candidate) from the final interleaved rounds,
 /// using the per-shape median across rounds. Only shapes present in both arms.
 fn shape_speedups(
@@ -3538,6 +3595,23 @@ mod verify_timeout_tests {
         );
         assert_eq!(parse_bench_shape(Some("route=x T=2048")), None); // one dim only
         assert_eq!(parse_bench_shape(None), None);
+    }
+
+    #[test]
+    fn shapes_block_marks_gate_and_caps() {
+        use crate::parse::BenchRow;
+        let r = |l: &str, us: f64| BenchRow {
+            label: l.into(),
+            median_us: us,
+            ..Default::default()
+        };
+        assert!(shapes_block(&[], None).is_none());
+        let b = shapes_block(&[r("T=1", 10.0), r("T=2048", 700.0)], Some("T=2048")).unwrap();
+        assert!(b.contains("T=2048") && b.contains("gate shape"), "{b}");
+        assert!(b.find("T=1").unwrap() < b.find("T=2048").unwrap(), "{b}"); // smallest first
+        let many: Vec<BenchRow> = (0..30).map(|i| r(&format!("T={i}"), i as f64 + 1.0)).collect();
+        let b = shapes_block(&many, None).unwrap();
+        assert!(b.contains("plus 15 more"), "{b}");
     }
 
     #[test]
