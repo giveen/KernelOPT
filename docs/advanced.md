@@ -94,9 +94,9 @@ kernelopt resume  <run_id>            # resume an interrupted run from its journ
 kernelopt eval    <campaign_id>       # self-benchmark: win rate, speedups, cost
 ```
 
-Providers: `opencode-go` (default), `openai`, `openrouter`, `ollama`, `vllm`,
-`lmstudio`, `mock`. `--reasoning-effort` / `--thinking` (default `low`) sets the
-thinking level. See `.env.example` for all keys.
+Providers: `opencode-go` (default), `openai`, `deepseek`, `openrouter`, `ollama`,
+`vllm`, `lmstudio`, `mock`. `--reasoning-effort` / `--thinking` (default `low`)
+sets the thinking level. See `.env.example` for all keys.
 
 ## Documentation lookup (CUDA/HIP API docs)
 

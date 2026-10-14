@@ -498,7 +498,7 @@ enum Cmd {
 
 #[derive(clap::Args, Clone)]
 struct LlmArgs {
-    /// Provider preset (opencode-go|openai|openrouter|ollama|vllm|lmstudio|mock).
+    /// Provider preset (opencode-go|openai|deepseek|openrouter|ollama|vllm|lmstudio|mock).
     /// Env fallback: KERNELOPT_PROVIDER.
     #[arg(long)]
     provider: Option<String>,
@@ -1523,7 +1523,7 @@ fn providers(
 ) -> Result<()> {
     let r = resolve_llm(provider, model, base_url, api_key, None);
     let (provider, model, base_url, api_key) = (r.provider, r.model, r.base_url, r.api_key);
-    for name in ["opencode-go", "openai", "openrouter", "ollama", "vllm", "lmstudio"] {
+    for name in ["opencode-go", "openai", "deepseek", "openrouter", "ollama", "vllm", "lmstudio"] {
         if let Some(p) = config::provider_preset(name) {
             println!(
                 "{:<14} {:<35} key-env: {}",

@@ -189,7 +189,7 @@ Used by `run`, `run-ninfer`, `run-llamacpp`, `campaign`.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--provider <PRESET>` | `opencode-go` | Provider preset (`opencode-go`, `openai`, `openrouter`, `ollama`, `vllm`, `lmstudio`, `mock`). Env `KERNELOPT_PROVIDER`. |
+| `--provider <PRESET>` | `opencode-go` | Provider preset (`opencode-go`, `openai`, `deepseek`, `openrouter`, `ollama`, `vllm`, `lmstudio`, `mock`). Env `KERNELOPT_PROVIDER`. |
 | `--model <ID>` | `deepseek-v4-pro` | Model id at the provider. Env `KERNELOPT_MODEL`. |
 | `--base-url <URL>` | preset | Override the OpenAI-compatible endpoint. Env `KERNELOPT_BASE_URL`. |
 | `--api-key <KEY>` | preset env | API key. Env `KERNELOPT_API_KEY`, else the preset's key var (`OPENCODE_API_KEY`, …). |

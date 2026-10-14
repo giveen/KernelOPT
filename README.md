@@ -99,8 +99,8 @@ are optional. If you pass `--repo "$NINFER_REPO"`, export it first
 
 KernelOPT talks to the optimizer LLM over HTTP, so the model itself needs no
 local GPU — and that is the recommended setup: point it at a cloud provider
-(`opencode-go` default, `openai`, `openrouter`) or an LLM server on **another
-machine**, and keep this machine's GPU entirely for compiling, benchmarking,
+(`opencode-go` default, `openai`, `deepseek`, `openrouter`) or an LLM server on
+**another machine**, and keep this machine's GPU entirely for compiling, benchmarking,
 and profiling your model.
 
 Serving the LLM on the *same* GPU (`ollama`, `vllm`, `lmstudio` locally) works

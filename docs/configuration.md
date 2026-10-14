@@ -17,7 +17,7 @@ override `.env`, and `~` is expanded in path values. `.env` is git-ignored.
 | `KERNELOPT_BASE_URL` | custom OpenAI-compatible base URL |
 | `KERNELOPT_API_KEY` | API key (else the preset's key var) |
 | `KERNELOPT_REASONING_EFFORT` | thinking level: `none\|minimal\|low\|medium\|high` |
-| `OPENCODE_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` | provider keys |
+| `OPENCODE_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY` | provider keys |
 | `KERNELOPT_ENV_FILE` | load a different env file |
 | `KERNELOPT_GRAPH_SIGNAL_DIR` | relocate the managed Graphsignal venv |
 | `KERNELOPT_GRAPH_SIGNAL_SOURCE` | Graphsignal install source (default: the fork) |
@@ -31,6 +31,7 @@ Any OpenAI-compatible endpoint. Presets:
 |---|---|---|
 | `opencode-go` (default) | `https://opencode.ai/zen/go/v1` | `OPENCODE_API_KEY` |
 | `openai` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
+| `deepseek` | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` |
 | `openrouter` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
 | `ollama` / `vllm` / `lmstudio` | local | — |
 | `mock` | scripted, zero tokens (tests) | — |

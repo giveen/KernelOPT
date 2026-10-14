@@ -28,6 +28,11 @@ pub fn provider_preset(name: &str) -> Option<ProviderPreset> {
             "https://api.openai.com/v1".into(),
             Some("OPENAI_API_KEY"),
         ),
+        "deepseek" => (
+            "deepseek".into(),
+            "https://api.deepseek.com".into(),
+            Some("DEEPSEEK_API_KEY"),
+        ),
         "openrouter" => (
             "openrouter".into(),
             "https://openrouter.ai/api/v1".into(),
