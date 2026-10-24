@@ -2,7 +2,8 @@
 
 Precedence for every setting: **CLI flag → environment/`.env` → `config.toml` →
 built-in default**. `--repo` is required unless the matching env var
-(`NINFER_REPO`/`LLAMACPP_REPO`) is set — there are no built-in repo paths.
+(`NINFER_REPO`/`LLAMACPP_REPO`/`CUSTOM_REPO`) is set — there are no built-in repo
+paths.
 
 ## Command behavior
 
@@ -160,8 +161,8 @@ models`), and a loop preset; then prints and runs the equivalent command.
 
 - `--yes` — accept detected defaults, no prompts (all targets, `standard` preset).
 - `--dry-run` — print the command and exit without running it.
-- `--save` — upsert the choices into `.env` (`NINFER_REPO`/`LLAMACPP_REPO`,
-  `KERNELOPT_PROVIDER`, `KERNELOPT_MODEL`, `KERNELOPT_ITERATIONS`,
+- `--save` — upsert the choices into `.env` (`NINFER_REPO`/`LLAMACPP_REPO`/
+  `CUSTOM_REPO`, `KERNELOPT_PROVIDER`, `KERNELOPT_MODEL`, `KERNELOPT_ITERATIONS`,
   `KERNELOPT_BEAM`, `KERNELOPT_PLANS`, and `KERNELOPT_E2E_WEIGHTS`), so later
   plain commands pick them up. Existing keys are rewritten in place; comments are
   preserved.
@@ -274,8 +275,8 @@ See "What each campaign option does" above.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--repo <DIR>` | required | Target checkout. |
-| `--mode <MODE>` | `auto` | Backend: `auto`, `ninfer`, `llamacpp`. |
+| `--repo <DIR>` | required | Target checkout (else the `--mode`'s env var: `NINFER_REPO`, `LLAMACPP_REPO`, or `CUSTOM_REPO`). |
+| `--mode <MODE>` | `auto` | Backend: `auto`, `ninfer`, `llamacpp`, `custom`. |
 | `--op <OP>` | all | Restrict to ops/families (repeatable). |
 | `--max-targets <M>` | `0` | Stop after M targets. |
 | `--budget-hours <H>` | `0` | Wall-clock budget. |
@@ -309,7 +310,7 @@ Inventory targets without running anything.
 |---|---|---|
 | `--op <TOKEN>` | list all | Show one target. |
 | `--repo <DIR>` | env | Target checkout. |
-| `--mode <MODE>` | `auto` | Backend: `auto`, `ninfer`, `llamacpp`. |
+| `--mode <MODE>` | `auto` | Backend: `auto`, `ninfer`, `llamacpp`, `custom`. |
 | `--list` | off | List every runnable target (JSON). |
 
 ### `kernelopt profile`
@@ -319,7 +320,7 @@ Rank kernels by real engine share using Graphsignal (attribution only).
 | Option | Default | Meaning |
 |---|---|---|
 | `--repo <DIR>` | env | Target checkout. |
-| `--mode <MODE>` | `auto` | Backend: `auto`, `ninfer`, `llamacpp`. |
+| `--mode <MODE>` | `auto` | Backend: `auto`, `ninfer`, `llamacpp`, `custom`. |
 | `--cmd <ARGV…>` | required | Workload to run under `graphsignal-run` (place last). |
 | `--listen-port <PORT>` | `18259` | Graphsignal `/signals` port. |
 | `--cuda-graph-trace <MODE>` | `node` | `node` = per-kernel inside CUDA graphs; `graph` = whole replays. |

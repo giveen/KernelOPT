@@ -86,7 +86,7 @@ New machine? Start with the ordered checklist: **[docs/prereqs.md](docs/prereqs.
 checkout → LLM key + tool-call model → verify). Then:
 
 ```bash
-cp .env.example .env     # set NINFER_REPO / LLAMACPP_REPO / KERNELOPT_MODEL / OPENCODE_API_KEY
+cp .env.example .env     # set NINFER_REPO / LLAMACPP_REPO / CUSTOM_REPO / KERNELOPT_MODEL / OPENCODE_API_KEY
 kernelopt setup          # full prereq table
 kernelopt setup --smoke  # prove the compiler works (seconds, no GPU needed)
 ```

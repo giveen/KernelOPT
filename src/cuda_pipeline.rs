@@ -1657,7 +1657,13 @@ impl<'a> CudaPipeline<'a> {
         if self.target.kernel_files.is_empty() {
             return self.finish_fallback("discover found no kernel files for this op");
         }
-        if self.target.test_filters.is_empty() {
+        // Gate 2 authority: built-in backends carry test filters (ctest / -o);
+        // custom targets carry the declared `test_cmd` instead.
+        let gate2 = match self.target.backend {
+            Backend::Custom => self.target.test_cmd.is_some(),
+            _ => !self.target.test_filters.is_empty(),
+        };
+        if !gate2 {
             return self.finish_fallback("target has no correctness authority (Gate 2 missing)");
         }
 

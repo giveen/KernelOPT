@@ -727,18 +727,23 @@ pub fn verify_view(resp: &Value, backend: crate::backend::Backend) -> Value {
         }
         crate::backend::Backend::Custom => {
             // A custom test command's contract is simply "exit 0 == correct".
-            // Best-effort: surface obvious FAIL lines.
-            let failing: Vec<Value> = text
-                .lines()
-                .filter(|l| {
-                    let u = l.to_uppercase();
-                    u.contains("FAIL") || u.contains("MISMATCH")
-                })
-                .take(20)
-                .map(|l| json!({"name": l.trim().chars().take(220).collect::<String>()}))
-                .collect();
+            // The output is only mined for context when the command failed —
+            // summaries like "0 failures" / "0 mismatches" must not read as
+            // failures.
+            let failing: Vec<Value> = if ran_clean {
+                Vec::new()
+            } else {
+                text.lines()
+                    .filter(|l| {
+                        let u = l.to_uppercase();
+                        u.contains("FAIL") || u.contains("MISMATCH")
+                    })
+                    .take(20)
+                    .map(|l| json!({"name": l.trim().chars().take(220).collect::<String>()}))
+                    .collect()
+            };
             json!({
-                "passed": ran_clean && failing.is_empty(),
+                "passed": ran_clean,
                 "exit_code": exit,
                 "failing_cases": failing,
                 "suite_output": output_tail(&text, 3000),
@@ -858,6 +863,25 @@ add_bias [4608,16384]            median=  181.08 us  min=  179.70 us  p95=  182.
         assert_eq!(p.rows.len(), 1);
         assert_eq!(p.rows[0].median_us, 12.34);
         assert_eq!(p.rows[0].effective_gbs, Some(100.5));
+    }
+
+    #[test]
+    fn custom_verify_trusts_exit_code_not_summary_words() {
+        // Basalt's parity programs end with "0 failures" / "0 mismatches".
+        let clean = json!({
+            "exit_code": 0,
+            "raw_stdout": "split parity: 320 cases x 2 splits, 0 mismatches\nsampler: 0 failures\n",
+            "raw_stderr": "",
+        });
+        let v = verify_view(&clean, crate::backend::Backend::Custom);
+        assert_eq!(v["passed"], true);
+        assert!(v["failing_cases"].as_array().unwrap().is_empty());
+
+        // A non-zero exit still surfaces the offending lines.
+        let red = json!({"exit_code": 1, "raw_stdout": "FAIL: 2 mismatches\n", "raw_stderr": ""});
+        let v = verify_view(&red, crate::backend::Backend::Custom);
+        assert_eq!(v["passed"], false);
+        assert_eq!(v["failing_cases"].as_array().unwrap().len(), 1);
     }
 
     #[test]

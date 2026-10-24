@@ -820,8 +820,8 @@ fn main() -> Result<()> {
         } => {
             let repo = resolve_repo(
                 repo,
-                &["NINFER_REPO", "LLAMACPP_REPO"],
-                "NINFER_REPO or LLAMACPP_REPO",
+                repo_envs(&mode),
+                "NINFER_REPO, LLAMACPP_REPO or CUSTOM_REPO",
             )?;
             let backend = backend::resolve_backend(&repo, Some(&mode))?;
             let cfg = load_cuda_config(&llm_args, &loop_, ProfilerMode::Ncu, ncu_set)?;
@@ -907,12 +907,11 @@ fn main() -> Result<()> {
         }
 
         Cmd::Profile { repo, mode, cmd, listen_port, cuda_graph_trace, top, cwd, no_setup, source, json, engine } => {
-            let envs: &[&str] = match mode.to_ascii_lowercase().as_str() {
-                "llamacpp" | "llama.cpp" | "llama" => &["LLAMACPP_REPO"],
-                "ninfer" => &["NINFER_REPO"],
-                _ => &["NINFER_REPO", "LLAMACPP_REPO"],
-            };
-            let repo = resolve_repo(repo, envs, "NINFER_REPO or LLAMACPP_REPO")?;
+            let repo = resolve_repo(
+                repo,
+                repo_envs(&mode),
+                "NINFER_REPO, LLAMACPP_REPO or CUSTOM_REPO",
+            )?;
             let backend = backend::resolve_backend(&repo, Some(&mode))?;
             let targets = backend::discover_targets(&repo, backend)?;
             let engine = if engine.eq_ignore_ascii_case("auto") {
@@ -1010,12 +1009,11 @@ fn main() -> Result<()> {
         }
 
         Cmd::Discover { op, repo, mode, list } => {
-            let envs: &[&str] = match mode.to_ascii_lowercase().as_str() {
-                "llamacpp" | "llama.cpp" | "llama" => &["LLAMACPP_REPO"],
-                "ninfer" => &["NINFER_REPO"],
-                _ => &["NINFER_REPO", "LLAMACPP_REPO"],
-            };
-            let repo = resolve_repo(repo, envs, "NINFER_REPO or LLAMACPP_REPO")?;
+            let repo = resolve_repo(
+                repo,
+                repo_envs(&mode),
+                "NINFER_REPO, LLAMACPP_REPO or CUSTOM_REPO",
+            )?;
             let backend = backend::resolve_backend(&repo, Some(&mode))?;
             if list || op.is_none() {
                 let targets = backend::discover_targets(&repo, backend)?;
@@ -1168,7 +1166,7 @@ fn main() -> Result<()> {
         }
 
         Cmd::Map { repo, symbol } => {
-            let repo = resolve_repo(repo, &["NINFER_REPO", "LLAMACPP_REPO"], "repo")?;
+            let repo = resolve_repo(repo, &["NINFER_REPO", "LLAMACPP_REPO", "CUSTOM_REPO"], "repo")?;
             let Some(cm) = kernelopt::codemap::open(&repo) else {
                 anyhow::bail!(
                     "codebase-memory-mcp not found — install it (`kernelopt setup`) or set KERNELOPT_CODEMAP_CMD"
@@ -1264,6 +1262,16 @@ fn install_interrupt() -> Arc<AtomicBool> {
         }
     });
     flag
+}
+
+/// Env vars that can supply the target checkout for a given `--mode`.
+fn repo_envs(mode: &str) -> &'static [&'static str] {
+    match mode.to_ascii_lowercase().as_str() {
+        "llamacpp" | "llama.cpp" | "llama" => &["LLAMACPP_REPO"],
+        "ninfer" => &["NINFER_REPO"],
+        "custom" | "generic" | "cuda" => &["CUSTOM_REPO"],
+        _ => &["NINFER_REPO", "LLAMACPP_REPO", "CUSTOM_REPO"],
+    }
 }
 
 fn resolve_repo(repo: Option<String>, envs: &[&str], hint: &str) -> Result<PathBuf> {
@@ -1620,18 +1628,21 @@ fn wizard(
     // 1. Target checkout: flag -> env -> prompt.
     let repo_spec = repo
         .or_else(|| env_opt("NINFER_REPO"))
-        .or_else(|| env_opt("LLAMACPP_REPO"));
+        .or_else(|| env_opt("LLAMACPP_REPO"))
+        .or_else(|| env_opt("CUSTOM_REPO"));
     let repo_spec = match repo_spec {
         Some(r) => r,
         None if yes => {
-            anyhow::bail!("no target checkout: pass --repo or set NINFER_REPO/LLAMACPP_REPO")
+            anyhow::bail!(
+                "no target checkout: pass --repo or set NINFER_REPO/LLAMACPP_REPO/CUSTOM_REPO"
+            )
         }
         None => ask_line("Target checkout path: ")?,
     };
     let repo = PathBuf::from(kernelopt::dotenv::expand_tilde(&repo_spec));
     if !repo.is_dir() {
         anyhow::bail!(
-            "repo not found: {} (set NINFER_REPO/LLAMACPP_REPO or pass --repo)",
+            "repo not found: {} (set NINFER_REPO/LLAMACPP_REPO/CUSTOM_REPO or pass --repo)",
             repo.display()
         );
     }
@@ -1711,8 +1722,7 @@ fn wizard(
         let repo_key = match backend {
             Backend::Ninfer => Some("NINFER_REPO"),
             Backend::Llamacpp => Some("LLAMACPP_REPO"),
-            // Custom repos are passed with --repo (no canonical env var).
-            Backend::Custom => None,
+            Backend::Custom => Some("CUSTOM_REPO"),
         };
         let mut pairs: Vec<(String, String)> = vec![
             ("KERNELOPT_PROVIDER".into(), provider.clone()),
@@ -1960,6 +1970,7 @@ fn list_models(mode: Option<String>, repo: Option<String>, json: bool) -> Result
         .map(|p| kernelopt::dotenv::expand_tilde(&p))
         .or_else(|| env_opt("NINFER_REPO").map(|p| kernelopt::dotenv::expand_tilde(&p)))
         .or_else(|| env_opt("LLAMACPP_REPO").map(|p| kernelopt::dotenv::expand_tilde(&p)))
+        .or_else(|| env_opt("CUSTOM_REPO").map(|p| kernelopt::dotenv::expand_tilde(&p)))
         .unwrap_or_else(|| ".".to_string());
     let repo = std::path::PathBuf::from(repo);
     let backend = mode.as_deref().filter(|m| *m != "auto");

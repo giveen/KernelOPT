@@ -11,7 +11,7 @@ override `.env`, and `~` is expanded in path values. `.env` is git-ignored.
 
 | Key | Purpose |
 |---|---|
-| `NINFER_REPO` / `LLAMACPP_REPO` | target checkout paths |
+| `NINFER_REPO` / `LLAMACPP_REPO` / `CUSTOM_REPO` | target checkout paths (selected by `--mode`) |
 | `KERNELOPT_PROVIDER` | provider preset (default `opencode-go`) |
 | `KERNELOPT_MODEL` | model id (default `deepseek-v4-pro`) |
 | `KERNELOPT_BASE_URL` | custom OpenAI-compatible base URL |

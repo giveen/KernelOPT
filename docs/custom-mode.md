@@ -52,8 +52,8 @@ build_cmd = ["make", "-C", "{build}", "-j8"]
 # What's optimizable?
 kernelopt discover --repo /path/to/my-engine --mode custom --list
 
-# Optimize one target (a one-target campaign)
-kernelopt campaign --repo /path/to/my-engine --mode custom \
+# Or set it once in .env (`CUSTOM_REPO=/path/to/my-engine`) and drop --repo.
+kernelopt campaign --mode custom \
     --op add_bias --max-targets 1 --max-iterations 3 --watch
 
 # Or the guided path (auto-detects kernelopt.toml)
